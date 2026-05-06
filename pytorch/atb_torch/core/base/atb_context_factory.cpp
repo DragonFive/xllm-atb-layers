@@ -14,10 +14,15 @@
  * limitations under the License.
  */
 #include "atb_context_factory.h"
+#include <unordered_map>
 #include "atb_speed/log.h"
 #include "config.h"
 
 namespace atb_torch {
+namespace {
+thread_local std::unordered_map<void *, std::shared_ptr<atb::Context>> g_localContexts;
+}  // namespace
+
 AtbContextFactory &AtbContextFactory::Instance()
 {
     static AtbContextFactory instance;
@@ -26,9 +31,10 @@ AtbContextFactory &AtbContextFactory::Instance()
 
 std::shared_ptr<atb::Context> AtbContextFactory::GetAtbContext(void *stream)
 {
-    if (atbContext_) {
+    auto contextIt = g_localContexts.find(stream);
+    if (contextIt != g_localContexts.end()) {
         ATB_SPEED_LOG_DEBUG("AtbContextFactory return localContext");
-        return atbContext_;
+        return contextIt->second;
     }
 
     ATB_SPEED_LOG_DEBUG("AtbContextFactory create atb::Context start");
@@ -46,24 +52,27 @@ std::shared_ptr<atb::Context> AtbContextFactory::GetAtbContext(void *stream)
             ATB_SPEED_LOG_DEBUG("AtbContextFactory not use tiling copy stream");
         }
     }
-    this->atbContext_ = std::shared_ptr<atb::Context>(
-        context, [](atb::Context* context) {atb::DestroyContext(context);});
+    std::shared_ptr<atb::Context> localContext(
+        context, [](atb::Context *context) { atb::DestroyContext(context); });
+    g_localContexts[stream] = localContext;
 
-    return atbContext_;
+    return localContext;
 }
 
 void AtbContextFactory::FreeAtbContext()
 {
     ATB_SPEED_LOG_DEBUG("AtbContextFactory FreeAtbContext start");
-    if (!atbContext_) {
+    if (g_localContexts.empty()) {
         return;
     }
 
-    ATB_SPEED_LOG_DEBUG("AtbContextFactory localContext use_count: " << atbContext_.use_count());
-    if (atbContext_.use_count() != 1) {
-        return;
+    for (auto contextIt = g_localContexts.begin(); contextIt != g_localContexts.end();) {
+        ATB_SPEED_LOG_DEBUG("AtbContextFactory localContext use_count: " << contextIt->second.use_count());
+        if (contextIt->second.use_count() == 1) {
+            contextIt = g_localContexts.erase(contextIt);
+        } else {
+            ++contextIt;
+        }
     }
-    ATB_SPEED_LOG_DEBUG("AtbContextFactory localContext reset");
-    atbContext_.reset();
 }
 } // namespace atb_torch

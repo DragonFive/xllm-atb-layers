@@ -30,6 +30,16 @@ struct ExecuteResult {
     std::string errorMsg;
 };
 
+struct OperationExecuteContext {
+    atb::VariantPack variant_pack;
+    uint8_t *workspace = nullptr;
+    uint64_t workspace_size = 0;
+    std::shared_ptr<atb::Context> atb_context;
+    TorchTensorList input_tensors;
+    TorchTensorList output_tensors;
+    TorchTensorList bind_tensors;
+};
+
 class Operation {
 public:
     explicit Operation(const std::string &opName);
@@ -53,13 +63,17 @@ public:
 protected:
     void *CreateWorkspace(size_t workspaceSize);
     virtual void ExecuteAtbTensor(const std::vector<atb::Tensor> &atbInTensors,
-                                  const std::vector<atb::Tensor> &atbOutTensors);
+                                  const std::vector<atb::Tensor> &atbOutTensors,
+                                  const TorchTensorList &atInTensors,
+                                  const TorchTensorList &atOutTensors,
+                                  const TorchTensorList &bindTensors);
 
 protected:
     std::string opName_;
     atb::Operation *atbOperation_ = nullptr;
     bool releaseAtbOperation_ = true;
     std::shared_ptr<atb::Context> atbContext_;
+    void *atb_stream_ = nullptr;
     TorchTensorMap preInAtTensorMap_;
     TorchTensorMap preOutAtTensorMap_;
     TorchTensorMap preBindAtTensorMap_;
@@ -81,10 +95,8 @@ private:
                          std::vector<std::string> &outNames);
     void ConvertTensorMapToTensorList(const TorchTensorMap &tensorMap, const TorchTensorMap &preTensorMap,
                                       const std::map<std::string, int> &nameMap, TorchTensorList &tensorList);
-    void ExecuteSync(atb::VariantPack &variantPack,
-                    uint8_t *workspace, uint64_t workspaceSize, atb::Context *atbContext);
-    void ExecuteAsync(atb::VariantPack &variantPack,
-                    uint8_t *workspace, uint64_t workspaceSize, atb::Context *atbContext);
+    void ExecuteSync(const std::shared_ptr<OperationExecuteContext> &execute_context);
+    void ExecuteAsync(const std::shared_ptr<OperationExecuteContext> &execute_context);
 };
 
 #define CHECK_THROW(condition, message) \

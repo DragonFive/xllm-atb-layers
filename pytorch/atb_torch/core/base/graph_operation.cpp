@@ -215,48 +215,60 @@ bool GraphOperation::GetExecuteAsSingle() const noexcept
 }
 
 void GraphOperation::ExecuteAtbTensor(
-    const std::vector<atb::Tensor> &inTensors, const std::vector<atb::Tensor> &outTensors)
+    const std::vector<atb::Tensor> &inTensors,
+    const std::vector<atb::Tensor> &outTensors,
+    const TorchTensorList &atInTensors,
+    const TorchTensorList &atOutTensors,
+    const TorchTensorList &bindTensors)
 {
     if (executeAsSingle_) {
         ATB_SPEED_LOG_DEBUG(opName_ << " execute graph as single");
-        Operation::ExecuteAtbTensor(inTensors, outTensors);
+        Operation::ExecuteAtbTensor(
+            inTensors, outTensors, atInTensors, atOutTensors, bindTensors);
         return;
     }
 
     ATB_SPEED_LOG_DEBUG(opName_ << " execute graph operation start");
-    if (!executeGraph_) {
-        ATB_SPEED_LOG_DEBUG(opName_ << " new ExecuteGraph");
-        executeGraph_ = std::make_unique<ExecuteGraph>();
-        if (!executeGraph_) {
-            ATB_SPEED_LOG_ERROR(opName_ << " new ExecuteGraph fail");
-            throw std::runtime_error("new ExecuteGraph fail");
-        }
+    std::shared_ptr<GraphExecuteContext> executeContext = std::make_shared<GraphExecuteContext>();
+    executeContext->atb_context = atbContext_;
+    executeContext->input_tensors = atInTensors;
+    executeContext->output_tensors = atOutTensors;
+    executeContext->bind_tensors = bindTensors;
 
-        ATB_SPEED_LOG_DEBUG(opName_ << " AtbGraphParam convert to ExecuteGraph");
-        AtbGraphParam2ExecuteGraph(atbGraphParam_, *executeGraph_);
-        executeGraph_->InitTensorMaxNodeMap();
-    }
+    ATB_SPEED_LOG_DEBUG(opName_ << " AtbGraphParam convert to ExecuteGraph");
+    AtbGraphParam2ExecuteGraph(atbGraphParam_, executeContext->execute_graph);
+    executeContext->execute_graph.InitTensorMaxNodeMap();
 
-    if (executeGraph_->inTensors.size() != inTensors.size()) {
+    if (executeContext->execute_graph.inTensors.size() != inTensors.size()) {
         ATB_SPEED_LOG_ERROR(opName_ << " execute in tensor num:" << inTensors.size()
-                       << " != graph in tensor num:" << executeGraph_->inTensors.size());
+                       << " != graph in tensor num:" << executeContext->execute_graph.inTensors.size());
         throw std::runtime_error("in tensor num not equal graph in tensor");
     }
 
-    if (executeGraph_->outTensors.size() != outTensors.size()) {
+    if (executeContext->execute_graph.outTensors.size() != outTensors.size()) {
         ATB_SPEED_LOG_ERROR(opName_ << " execute out tensor num:" << outTensors.size()
-                       << " != graph out tensor num:" << executeGraph_->outTensors.size());
+                       << " != graph out tensor num:" << executeContext->execute_graph.outTensors.size());
         throw std::runtime_error("out tensor num not equal graph out tensor");
     }
 
-    executeGraph_->cachedTorchTensors.clear();
-    executeGraph_->inTensors = inTensors;
-    executeGraph_->outTensors = outTensors;
+    executeContext->execute_graph.cachedTorchTensors.clear();
+    executeContext->execute_graph.inTensors = inTensors;
+    executeContext->execute_graph.outTensors = outTensors;
 
     ATB_SPEED_LOG_DEBUG(opName_ << " execute all node start");
-    for (size_t nodeId = 0; nodeId < executeGraph_->nodes.size(); ++nodeId) {
-        BuildSingleNodeVariantPack(nodeId);
-        ExecuteSingleNode(nodeId);
+    if (Config::Instance().IsTaskQueueEnable()) {
+        for (size_t nodeId = 0; nodeId < executeContext->execute_graph.nodes.size(); ++nodeId) {
+            BuildSingleNodeVariantPack(nodeId, *executeContext);
+        }
+        for (size_t nodeId = 0; nodeId < executeContext->execute_graph.nodes.size(); ++nodeId) {
+            ExecuteSingleNode(nodeId, executeContext);
+        }
+    } else {
+        for (size_t nodeId = 0; nodeId < executeContext->execute_graph.nodes.size(); ++nodeId) {
+            BuildSingleNodeVariantPack(nodeId, *executeContext);
+            ExecuteSingleNode(nodeId, executeContext);
+            FreeGraphInternalTensor(nodeId, *executeContext);
+        }
     }
     ATB_SPEED_LOG_DEBUG(opName_ << " execute all node success");
 }
@@ -331,9 +343,11 @@ void GraphOperation::BuildFullTensorPtrs(
     }
 }
 
-void GraphOperation::BuildSingleNodeVariantPack(size_t nodeId)
+void GraphOperation::BuildSingleNodeVariantPack(size_t nodeId,
+                                                GraphExecuteContext &executeContext)
 {
-    ExecuteNode &node = executeGraph_->nodes[nodeId];
+    ExecuteGraph &executeGraph = executeContext.execute_graph;
+    ExecuteNode &node = executeGraph.nodes[nodeId];
 
     ATB_SPEED_LOG_DEBUG(opName_ << " nodes[" << nodeId << "] infer shape start");
     atb::SVector<atb::TensorDesc> inTensorDescs;
@@ -374,7 +388,8 @@ void GraphOperation::BuildSingleNodeVariantPack(size_t nodeId)
         node.variantPack.outTensors.at(i) = *node.outTensors.at(i);
         if (node.outTensorTypes.at(i) == TensorType::TENSOR_TYPE_INTERNAL) {
             ATB_SPEED_LOG_DEBUG(opName_ << " nodes[" << nodeId << "] outTensors[" << i << "] is internal tensor");
-            at::Tensor atInternalTensor = MallocInternalTensor(nodeId, i, outTensorDescs.at(i));
+            at::Tensor atInternalTensor =
+                MallocInternalTensor(nodeId, i, executeContext, outTensorDescs.at(i));
             node.variantPack.outTensors.at(i) = Utils::AtTensor2Tensor(atInternalTensor);
             node.variantPack.outTensors.at(i).desc = outTensorDescs.at(i);
             *node.outTensors.at(i) = node.variantPack.outTensors.at(i);
@@ -382,29 +397,30 @@ void GraphOperation::BuildSingleNodeVariantPack(size_t nodeId)
             ATB_SPEED_LOG_DEBUG(opName_ << " nodes[" << nodeId << "] outTensors[" << i << "] not internal tensor");
         }
     }
-    FreeGraphInternalTensor(nodeId);
 }
 
-void GraphOperation::FreeGraphInternalTensor(size_t nodeId)
+void GraphOperation::FreeGraphInternalTensor(size_t nodeId,
+                                             GraphExecuteContext &executeContext)
 {
-    auto it = executeGraph_->maxNodeIdTensorMap.find(nodeId);
-    if (it != executeGraph_->maxNodeIdTensorMap.end()) {
+    auto it = executeContext.execute_graph.maxNodeIdTensorMap.find(nodeId);
+    if (it != executeContext.execute_graph.maxNodeIdTensorMap.end()) {
         for (auto tensorIt : it->second) {
-            FreeInternalTensor(nodeId, tensorIt->deviceData);
+            FreeInternalTensor(nodeId, executeContext, tensorIt->deviceData);
         }
     }
 }
 
-void GraphOperation::ExecuteSingleNode(size_t nodeId)
+void GraphOperation::ExecuteSingleNode(
+    size_t nodeId, const std::shared_ptr<GraphExecuteContext> &executeContext)
 {
-    ExecuteNode &node = executeGraph_->nodes[nodeId];
+    ExecuteNode &node = executeContext->execute_graph.nodes[nodeId];
     if (node.inTensorReshapeFuncs.size() > 0) {
         for (size_t i = 0; i < node.inTensors.size() && node.inTensorReshapeFuncs.at(i) != nullptr; i++) {
             node.inTensorReshapeFuncs.at(i)(node.inTensors.at(i)->desc.shape, node.inTensors.at(i)->desc.shape);
         }
     }
 
-    atb::Context *atbContext = atbContext_.get();
+    atb::Context *atbContext = executeContext->atb_context.get();
 
     ATB_SPEED_LOG_DEBUG(opName_ << " nodes[" << nodeId << "] atb operation setup start" << node.workspaceSize);
     atb::Status st = node.atbOperation->Setup(node.variantPack, node.workspaceSize, atbContext);
@@ -420,24 +436,30 @@ void GraphOperation::ExecuteSingleNode(size_t nodeId)
     }
 
     if (Config::Instance().IsTaskQueueEnable()) {
-        ExecuteNode *executeNode = &node;
+        std::string opName = opName_;
         at_npu::native::OpCommand cmd;
-        cmd.Name(opName_);
-        cmd.SetCustomHandler([=]() {
-            ATB_SPEED_LOG_DEBUG(opName_ << " nodes[" << nodeId << "] atb operation execute start");
-            atb::Status st = executeNode->atbOperation->Execute(
-                executeNode->variantPack, (uint8_t *)executeNode->workspace, executeNode->workspaceSize, atbContext);
-            if (st == 0) {
-                ATB_SPEED_LOG_DEBUG(opName_ << " nodes[" << nodeId << "] atb operation execute success");
+        cmd.Name(opName);
+        cmd.SetCustomHandler([executeContext, nodeId, opName]() {
+            ExecuteNode &executeNode = executeContext->execute_graph.nodes[nodeId];
+            ATB_SPEED_LOG_DEBUG(opName << " nodes[" << nodeId << "] atb operation execute start");
+            atb::Status executeStatus = executeNode.atbOperation->Execute(
+                executeNode.variantPack,
+                static_cast<uint8_t *>(executeNode.workspace),
+                executeNode.workspaceSize,
+                executeContext->atb_context.get());
+            if (executeStatus == 0) {
+                ATB_SPEED_LOG_DEBUG(opName << " nodes[" << nodeId << "] atb operation execute success");
             } else {
-                ATB_SPEED_LOG_ERROR(opName_ << " nodes[" << nodeId << "] atb operation execute fail, error:" << st, \
-                    ATB_MODELS_EXECUTION_FAILURE);
+                ATB_SPEED_LOG_ERROR(opName << " nodes[" << nodeId
+                                    << "] atb operation execute fail, error:" << executeStatus,
+                                    ATB_MODELS_EXECUTION_FAILURE);
             }
-            return st;
+            return executeStatus;
         });
         cmd.Run();
     } else {
-        st = node.atbOperation->Execute(node.variantPack, (uint8_t *)(node.workspace), node.workspaceSize, atbContext);
+        st = node.atbOperation->Execute(
+            node.variantPack, static_cast<uint8_t *>(node.workspace), node.workspaceSize, atbContext);
         if (st == 0) {
             ATB_SPEED_LOG_DEBUG(opName_ << " nodes[" << nodeId << "] atb operation execute success");
         } else {
@@ -448,7 +470,10 @@ void GraphOperation::ExecuteSingleNode(size_t nodeId)
     }
 }
 
-at::Tensor GraphOperation::MallocInternalTensor(size_t nodeId, size_t outTensorId, const atb::TensorDesc &tensorDesc)
+at::Tensor GraphOperation::MallocInternalTensor(size_t nodeId,
+                                                size_t outTensorId,
+                                                GraphExecuteContext &executeContext,
+                                                const atb::TensorDesc &tensorDesc)
 {
     static std::map<at::ScalarType, aclDataType> dtypeMap = {
         {at::ScalarType::Bool, ACL_BOOL},
@@ -461,10 +486,11 @@ at::Tensor GraphOperation::MallocInternalTensor(size_t nodeId, size_t outTensorI
         {at::ScalarType::BFloat16, ACL_BF16},
     };
     size_t tensorSize = atb::Utils::GetTensorSize(tensorDesc);
-    auto atbTensorPtr = executeGraph_->nodes[nodeId].outTensors.at(outTensorId);
+    auto atbTensorPtr = executeContext.execute_graph.nodes[nodeId].outTensors.at(outTensorId);
     size_t cacheTensorId = 0;
-    for (cacheTensorId = 0; cacheTensorId < executeGraph_->cachedTorchTensors.size(); ++cacheTensorId) {
-        auto &cachedTorchTensor = executeGraph_->cachedTorchTensors[cacheTensorId];
+    for (cacheTensorId = 0; cacheTensorId < executeContext.execute_graph.cachedTorchTensors.size();
+         ++cacheTensorId) {
+        auto &cachedTorchTensor = executeContext.execute_graph.cachedTorchTensors[cacheTensorId];
         if (cachedTorchTensor.atbTensorPtr == atbTensorPtr) { // write inplace
             ATB_SPEED_LOG_DEBUG(opName_ << " nodes[" << nodeId << "] write inplace");
             return cachedTorchTensor.atTensor;
@@ -489,7 +515,7 @@ at::Tensor GraphOperation::MallocInternalTensor(size_t nodeId, size_t outTensorI
     }
 
     ATB_SPEED_LOG_DEBUG(opName_ << " nodes[" << nodeId << "] create internal torch tensor["
-                  << executeGraph_->cachedTorchTensors.size() << "], outTensor[" << outTensorId
+                  << executeContext.execute_graph.cachedTorchTensors.size() << "], outTensor[" << outTensorId
                   << "]:" << Utils::TensorDescToString(tensorDesc)
                   << ", dataSize:" << atb::Utils::GetTensorSize(tensorDesc));
     CachedTorchTensor cachedTorchTensor;
@@ -497,14 +523,17 @@ at::Tensor GraphOperation::MallocInternalTensor(size_t nodeId, size_t outTensorI
     cachedTorchTensor.used = true;
     cachedTorchTensor.size = tensorSize;
     cachedTorchTensor.atbTensorPtr = atbTensorPtr;
-    executeGraph_->cachedTorchTensors.push_back(cachedTorchTensor);
+    executeContext.execute_graph.cachedTorchTensors.push_back(cachedTorchTensor);
     return cachedTorchTensor.atTensor;
 }
 
-void GraphOperation::FreeInternalTensor(size_t nodeId, const void *tensorDeviceData)
+void GraphOperation::FreeInternalTensor(size_t nodeId,
+                                        GraphExecuteContext &executeContext,
+                                        const void *tensorDeviceData)
 {
-    for (size_t cacheTensorId = 0; cacheTensorId < executeGraph_->cachedTorchTensors.size(); ++cacheTensorId) {
-        auto &cachedTorchTensor = executeGraph_->cachedTorchTensors[cacheTensorId];
+    for (size_t cacheTensorId = 0; cacheTensorId < executeContext.execute_graph.cachedTorchTensors.size();
+         ++cacheTensorId) {
+        auto &cachedTorchTensor = executeContext.execute_graph.cachedTorchTensors[cacheTensorId];
         if (cachedTorchTensor.atTensor.data_ptr() == tensorDeviceData) {
             cachedTorchTensor.used = false;
             ATB_SPEED_LOG_DEBUG(opName_ << " nodes[" << nodeId

@@ -34,10 +34,16 @@
 #include "atb_speed/utils/tensor_util.h"
 
 namespace atb_torch {
-void *Utils::GetCurrentStream()
+int32_t Utils::GetCurrentDevice()
 {
     int32_t devId = 0;
     aclrtGetDevice(&devId);
+    return devId;
+}
+
+void *Utils::GetCurrentStream()
+{
+    int32_t devId = GetCurrentDevice();
     void *stream = c10_npu::getCurrentNPUStream(devId).stream();
     if (stream == nullptr) {
         ATB_SPEED_LOG_ERROR("Get current stream fail");
@@ -48,8 +54,7 @@ void *Utils::GetCurrentStream()
 
 uint64_t Utils::GetCurrentStreamId()
 {
-    int32_t devId = 0;
-    aclrtGetDevice(&devId);
+    int32_t devId = GetCurrentDevice();
     return c10_npu::getCurrentNPUStream(devId).id();
 }
 

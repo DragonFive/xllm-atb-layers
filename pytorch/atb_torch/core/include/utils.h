@@ -24,6 +24,7 @@
 namespace atb_torch {
 class Utils {
 public:
+    static int32_t GetCurrentDevice();
     static void *GetCurrentStream();
     static uint64_t GetCurrentStreamId();
     static int GetCurrentCaptureStatus();

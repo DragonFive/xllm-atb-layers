@@ -15,8 +15,8 @@
  */
 #ifndef ATB_TORCH_CONFIG_H
 #define ATB_TORCH_CONFIG_H
+#include <cstdint>
 #include <string>
-#include <set>
 #include <torch/extension.h>
 
 namespace atb_torch {
@@ -26,9 +26,7 @@ public:
     bool IsUseTilingCopyStream() const;
     bool IsTorchTensorFormatCast() const;
     bool IsTaskQueueEnable() const;
-    uint64_t GetGlobalWorkspaceSize() const;
-    void SetGlobalWorkspaceSize(uint64_t size);
-    torch::Tensor &GetGlobalWorkspaceTensor();
+    void *GetWorkspace(uint64_t size, int32_t deviceId, uint64_t streamId);
 
 private:
     Config();
@@ -39,8 +37,7 @@ private:
     bool isUseTilingCopyStream_ = false;
     bool isTorchTensorFormatCast_ = false;
     bool isTaskQueueEnable_ = false;
-    uint64_t globalWorkspaceSize_ = 0;
-    torch::Tensor globalWorkspaceTensor_;
+    uint64_t defaultWorkspaceSize_ = 0;
 };
 } // namespace atb_torch
 #endif

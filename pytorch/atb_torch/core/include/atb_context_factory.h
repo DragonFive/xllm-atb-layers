@@ -24,9 +24,6 @@ public:
     static AtbContextFactory &Instance();
     std::shared_ptr<atb::Context> GetAtbContext(void *stream);
     void FreeAtbContext();
-
-private:
-    std::shared_ptr<atb::Context> atbContext_;
 };
 } // namespace atb_torch
 #endif

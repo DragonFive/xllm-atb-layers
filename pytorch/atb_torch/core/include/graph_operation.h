@@ -62,6 +62,14 @@ struct ExecuteGraph {
     void InitTensorMaxNodeMap();
 };
 
+struct GraphExecuteContext {
+    ExecuteGraph execute_graph;
+    std::shared_ptr<atb::Context> atb_context;
+    TorchTensorList input_tensors;
+    TorchTensorList output_tensors;
+    TorchTensorList bind_tensors;
+};
+
 class GraphOperation : public Operation {
 public:
     explicit GraphOperation(const std::string &opName);
@@ -87,24 +95,32 @@ protected:
     std::map<std::string, uint32_t> internalTensorIds_;
     std::map<std::string, std::pair<uint32_t, atb::ReshapeFunc>> viewTensorIds_; // key: viewTensorName
 
-    std::unique_ptr<ExecuteGraph> executeGraph_;
     std::vector<Operation*> subOperations_;
     bool executeAsSingle_ = true;
 
 protected:
     void ExecuteAtbTensor(const std::vector<atb::Tensor> &inTensors,
-                          const std::vector<atb::Tensor> &outTensors) override;
+                          const std::vector<atb::Tensor> &outTensors,
+                          const TorchTensorList &atInTensors,
+                          const TorchTensorList &atOutTensors,
+                          const TorchTensorList &bindTensors) override;
 
 private:
     int32_t GetTensorId(const std::string &tensorName);
     void AtbGraphParam2ExecuteGraph(const atb::GraphParam &atbGraphParam, ExecuteGraph &executeGraph) const;
     void BuildFullTensorPtrs(std::vector<std::pair<atb::Tensor *, TensorType>> &fullTensorPtrs,
                              ExecuteGraph &executeGraph) const;
-    void BuildSingleNodeVariantPack(size_t nodeId);
-    void FreeGraphInternalTensor(size_t nodeId);
-    void ExecuteSingleNode(size_t nodeId);
-    at::Tensor MallocInternalTensor(size_t nodeId, size_t outTensorId, const atb::TensorDesc &tensorDesc);
-    void FreeInternalTensor(size_t nodeId, const void *tensorDeviceData);
+    void BuildSingleNodeVariantPack(size_t nodeId, GraphExecuteContext &executeContext);
+    void FreeGraphInternalTensor(size_t nodeId, GraphExecuteContext &executeContext);
+    void ExecuteSingleNode(size_t nodeId,
+                           const std::shared_ptr<GraphExecuteContext> &executeContext);
+    at::Tensor MallocInternalTensor(size_t nodeId,
+                                    size_t outTensorId,
+                                    GraphExecuteContext &executeContext,
+                                    const atb::TensorDesc &tensorDesc);
+    void FreeInternalTensor(size_t nodeId,
+                            GraphExecuteContext &executeContext,
+                            const void *tensorDeviceData);
 };
 
 } // namespace atb_torch

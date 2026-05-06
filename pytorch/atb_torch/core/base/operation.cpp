@@ -42,6 +42,7 @@ Operation::~Operation()
     }
 
     atbContext_.reset();
+    atb_stream_ = nullptr;
     AtbContextFactory::Instance().FreeAtbContext();
 }
 
@@ -177,8 +178,10 @@ TorchTensorList Operation::ExecuteImpl(const TorchTensorList &atInTensors, const
 {
     CheckInput(atInTensors, atOutTensors, bindTensors);
 
-    if (!atbContext_) {
-        atbContext_ = AtbContextFactory::Instance().GetAtbContext(Utils::GetCurrentStream());
+    void *currentStream = Utils::GetCurrentStream();
+    if (!atbContext_ || atb_stream_ != currentStream) {
+        atbContext_ = AtbContextFactory::Instance().GetAtbContext(currentStream);
+        atb_stream_ = currentStream;
     }
 
     if (!atbContext_) {
@@ -194,15 +197,22 @@ TorchTensorList Operation::ExecuteImpl(const TorchTensorList &atInTensors, const
     std::vector<atb::Tensor> atbOutTensors;
     ConvertAtTensorToAtbTensor(atContiguousInTensors, atContiguousOutTensors, bindTensors, atbInTensors, atbOutTensors);
 
-    ExecuteAtbTensor(atbInTensors, atbOutTensors);
+    ExecuteAtbTensor(atbInTensors,
+                     atbOutTensors,
+                     atContiguousInTensors,
+                     atContiguousOutTensors,
+                     bindTensors);
     return atContiguousOutTensors;
 }
 
-void Operation::ExecuteSync(atb::VariantPack &variantPack,
-    uint8_t *workspace, uint64_t workspaceSize, atb::Context *atbContext)
+void Operation::ExecuteSync(
+    const std::shared_ptr<OperationExecuteContext> &execute_context)
 {
     ATB_SPEED_LOG_DEBUG(opName_ << " atb operation execute start");
-    atb::Status st = atbOperation_->Execute(variantPack, workspace, workspaceSize, atbContext);
+    atb::Status st = atbOperation_->Execute(execute_context->variant_pack,
+                                            execute_context->workspace,
+                                            execute_context->workspace_size,
+                                            execute_context->atb_context.get());
     if (st == 0) {
         ATB_SPEED_LOG_DEBUG(opName_ << " atb operation execute success");
     } else {
@@ -212,19 +222,25 @@ void Operation::ExecuteSync(atb::VariantPack &variantPack,
     }
 }
 
-void Operation::ExecuteAsync(atb::VariantPack &variantPack,
-    uint8_t *workspace, uint64_t workspaceSize, atb::Context *atbContext)
+void Operation::ExecuteAsync(
+    const std::shared_ptr<OperationExecuteContext> &execute_context)
 {
     ATB_SPEED_LOG_DEBUG(opName_ << " push atb operation execute task to task queue");
+    atb::Operation *atb_operation = atbOperation_;
+    std::string op_name = opName_;
     at_npu::native::OpCommand cmd;
-    cmd.Name(opName_);
-    cmd.SetCustomHandler([=]() {
-        ATB_SPEED_LOG_DEBUG(opName_ << " atb operation execute start");
-        atb::Status st = atbOperation_->Execute(variantPack, workspace, workspaceSize, atbContext);
+    cmd.Name(op_name);
+    cmd.SetCustomHandler([execute_context, atb_operation, op_name]() {
+        ATB_SPEED_LOG_DEBUG(op_name << " atb operation execute start");
+        atb::Status st = atb_operation->Execute(execute_context->variant_pack,
+                                                execute_context->workspace,
+                                                execute_context->workspace_size,
+                                                execute_context->atb_context.get());
         if (st == 0) {
-            ATB_SPEED_LOG_DEBUG(opName_ << " atb operation execute success");
+            ATB_SPEED_LOG_DEBUG(op_name << " atb operation execute success");
         } else {
-            ATB_SPEED_LOG_ERROR(opName_ << " atb operation execute fail, error:" << st, ATB_MODELS_EXECUTION_FAILURE);
+            ATB_SPEED_LOG_ERROR(op_name << " atb operation execute fail, error:" << st,
+                                ATB_MODELS_EXECUTION_FAILURE);
         }
         return st;
     });
@@ -232,32 +248,35 @@ void Operation::ExecuteAsync(atb::VariantPack &variantPack,
 }
 
 void Operation::ExecuteAtbTensor(const std::vector<atb::Tensor> &atbInTensors,
-                                 const std::vector<atb::Tensor> &atbOutTensors)
+                                 const std::vector<atb::Tensor> &atbOutTensors,
+                                 const TorchTensorList &atInTensors,
+                                 const TorchTensorList &atOutTensors,
+                                 const TorchTensorList &bindTensors)
 {
     if (!atbOperation_) {
         ATB_SPEED_LOG_ERROR(opName_ << " atb operation is null, execute fail", ATB_MODELS_EXECUTION_FAILURE);
         throw std::runtime_error("atb operation is null");
     }
 
-    atb::VariantPack variantPack;
-    
-    atb::SVector<atb::Tensor> ins;
-    ins.resize(atbInTensors.size());
-    for (size_t i = 0; i < ins.size(); i++) {
-        ins.at(i) = atbInTensors.at(i);
-    }
-    atb::SVector<atb::Tensor> outs;
-    outs.resize(atbOutTensors.size());
-    for (size_t i = 0; i < outs.size(); i++) {
-        outs.at(i) = atbOutTensors.at(i);
-    }
+    std::shared_ptr<OperationExecuteContext> execute_context = std::make_shared<OperationExecuteContext>();
+    execute_context->atb_context = atbContext_;
+    execute_context->input_tensors = atInTensors;
+    execute_context->output_tensors = atOutTensors;
+    execute_context->bind_tensors = bindTensors;
 
-    variantPack.inTensors = ins;
-    variantPack.outTensors = outs;
+    execute_context->variant_pack.inTensors.resize(atbInTensors.size());
+    for (size_t i = 0; i < atbInTensors.size(); ++i) {
+        execute_context->variant_pack.inTensors.at(i) = atbInTensors.at(i);
+    }
+    execute_context->variant_pack.outTensors.resize(atbOutTensors.size());
+    for (size_t i = 0; i < atbOutTensors.size(); ++i) {
+        execute_context->variant_pack.outTensors.at(i) = atbOutTensors.at(i);
+    }
 
     ATB_SPEED_LOG_DEBUG(opName_ << " atb operation setup start");
     uint64_t workspaceSize = 0;
-    atb::Status st = atbOperation_->Setup(variantPack, workspaceSize, atbContext_.get());
+    atb::Status st = atbOperation_->Setup(
+        execute_context->variant_pack, workspaceSize, execute_context->atb_context.get());
     CHECK_THROW(st == atb::ERROR_OUT_OF_DEVICE_MEMORY, "Npu out of memory, OOM");
     if (st != 0) {
         ATB_SPEED_LOG_ERROR(opName_ << " atb operation setup fail, error:" << st);
@@ -271,11 +290,12 @@ void Operation::ExecuteAtbTensor(const std::vector<atb::Tensor> &atbInTensors,
         workspace = CreateWorkspace(workspaceSize);
     }
 
-    atb::Context *atbContext = atbContext_.get();
+    execute_context->workspace = static_cast<uint8_t *>(workspace);
+    execute_context->workspace_size = workspaceSize;
     if (Config::Instance().IsTaskQueueEnable()) {
-        ExecuteAsync(variantPack, (uint8_t *)workspace, workspaceSize, atbContext);
+        ExecuteAsync(execute_context);
     } else {
-        ExecuteSync(variantPack, (uint8_t *)workspace, workspaceSize, atbContext);
+        ExecuteSync(execute_context);
     }
 }
 
@@ -418,22 +438,8 @@ void Operation::ConvertTensorMapToTensorList(const TorchTensorMap &tensorMap, co
 
 void *Operation::CreateWorkspace(size_t workspaceSize)
 {
-    if (Config::Instance().GetGlobalWorkspaceSize() > 0) {
-        ATB_SPEED_LOG_DEBUG(opName_ << " use global workspace tensor");
-        if (workspaceSize > Config::Instance().GetGlobalWorkspaceSize()) {
-            if (aclrtSynchronizeDevice() != 0) {
-                return nullptr;
-            }
-            ATB_SPEED_LOG_DEBUG(opName_ << " new global workspace tensor");
-            Config::Instance().SetGlobalWorkspaceSize(workspaceSize);
-        }
-
-        return Config::Instance().GetGlobalWorkspaceTensor().data_ptr();
-    }
-
-    ATB_SPEED_LOG_DEBUG(opName_
-                        << " use temp workspace tensor, unsafe_empty_workspace workspaceSize:" << workspaceSize);
-    throw std::runtime_error("temp workspace tensor not implement");
-    return nullptr;
+    int32_t deviceId = Utils::GetCurrentDevice();
+    uint64_t streamId = Utils::GetCurrentStreamId();
+    return Config::Instance().GetWorkspace(workspaceSize, deviceId, streamId);
 }
 } // namespace atb_torch

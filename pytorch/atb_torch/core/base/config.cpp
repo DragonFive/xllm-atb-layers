@@ -13,15 +13,52 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <string>
+#include <algorithm>
 #include <iostream>
+#include <string>
 #include <thread>
+#include <unordered_map>
+#include <utility>
 #include "utils.h"
 #include "atb_speed/log.h"
 #include "config.h"
 
 namespace atb_torch {
-constexpr uint64_t  DEFAULT_WORKSPACE_SIZE = 1024 * 1024 * 600;
+namespace {
+constexpr uint64_t kDefaultWorkspaceSize = 1024 * 1024 * 600;
+using WorkspaceCacheKey = std::pair<int32_t, uint64_t>;
+
+struct WorkspaceEntry {
+    uint64_t size = 0;
+    torch::Tensor tensor;
+};
+
+class WorkspaceCacheKeyHash final {
+public:
+    size_t operator()(const WorkspaceCacheKey &key) const
+    {
+        size_t deviceHash = std::hash<int32_t>()(key.first);
+        size_t streamHash = std::hash<uint64_t>()(key.second);
+        return deviceHash ^ (streamHash + 0x9e3779b9 + (deviceHash << 6) + (deviceHash >> 2));
+    }
+};
+
+thread_local std::unordered_map<WorkspaceCacheKey, WorkspaceEntry, WorkspaceCacheKeyHash> g_workspaceCache;
+
+torch::Tensor CreateWorkspaceTensor(uint64_t size)
+{
+    atb::TensorDesc tensorDesc;
+    tensorDesc.dtype = ACL_UINT8;
+    tensorDesc.format = ACL_FORMAT_ND;
+
+    constexpr int kKb1 = 1024;
+    tensorDesc.shape.dimNum = 2;
+    tensorDesc.shape.dims[0] = kKb1;
+    tensorDesc.shape.dims[1] = size / kKb1 + 1;
+
+    return Utils::CreateAtTensorFromTensorDesc(tensorDesc);
+}
+}  // namespace
 
 Config &Config::Instance()
 {
@@ -37,11 +74,11 @@ Config::Config()
     const char *blockingEnv = std::getenv("ASCEND_LAUNCH_BLOCKING");
     isTaskQueueEnable_ = !((taskQueueEnv != nullptr && std::string(taskQueueEnv) == "0") ||
                            (blockingEnv != nullptr && std::string(blockingEnv) == "1"));
-    SetGlobalWorkspaceSize(DEFAULT_WORKSPACE_SIZE);
+    defaultWorkspaceSize_ = kDefaultWorkspaceSize;
 
     ATB_SPEED_LOG_DEBUG("Config [IsTorchTensorFormatCast:" << isTorchTensorFormatCast_
                         << ", IsUseTilingCopyStream:" << isUseTilingCopyStream_
-                        << ", GlobalWorkspaceSize:" << GetGlobalWorkspaceSize()
+                        << ", DefaultWorkspaceSize:" << defaultWorkspaceSize_
                         << ", IsTaskQueueEnable:" << isTaskQueueEnable_ << "]");
 }
 
@@ -62,32 +99,23 @@ bool Config::IsTorchTensorFormatCast() const { return isTorchTensorFormatCast_; 
 
 bool Config::IsTaskQueueEnable() const { return isTaskQueueEnable_; }
 
-uint64_t Config::GetGlobalWorkspaceSize() const { return globalWorkspaceSize_; }
-
-void Config::SetGlobalWorkspaceSize(uint64_t size)
+void *Config::GetWorkspace(uint64_t size, int32_t deviceId, uint64_t streamId)
 {
-    if (size == globalWorkspaceSize_) {
-        return;
+    uint64_t workspaceSize = std::max(size, defaultWorkspaceSize_);
+    WorkspaceCacheKey cacheKey = std::make_pair(deviceId, streamId);
+    auto workspaceIt = g_workspaceCache.find(cacheKey);
+    if (workspaceIt != g_workspaceCache.end() && workspaceIt->second.size >= workspaceSize) {
+        return workspaceIt->second.tensor.data_ptr();
     }
 
-    globalWorkspaceSize_ = size;
-
-    if (size == 0) {
-        globalWorkspaceTensor_ = at::Tensor();
-        return;
+    if (workspaceIt != g_workspaceCache.end() && aclrtSynchronizeDevice() != 0) {
+        return nullptr;
     }
 
-    atb::TensorDesc tensorDesc;
-    tensorDesc.dtype = ACL_UINT8;
-    tensorDesc.format = ACL_FORMAT_ND;
-
-    constexpr int KB_1 = 1024;
-    tensorDesc.shape.dimNum = 2; // 2 dims, KB base
-    tensorDesc.shape.dims[0] = KB_1;
-    tensorDesc.shape.dims[1] = size / KB_1 + 1;
-
-    globalWorkspaceTensor_ = Utils::CreateAtTensorFromTensorDesc(tensorDesc);
+    WorkspaceEntry workspaceEntry;
+    workspaceEntry.size = workspaceSize;
+    workspaceEntry.tensor = CreateWorkspaceTensor(workspaceSize);
+    g_workspaceCache[cacheKey] = workspaceEntry;
+    return g_workspaceCache[cacheKey].tensor.data_ptr();
 }
-
-torch::Tensor &Config::GetGlobalWorkspaceTensor() { return globalWorkspaceTensor_; }
 } // namespace atb_torch
