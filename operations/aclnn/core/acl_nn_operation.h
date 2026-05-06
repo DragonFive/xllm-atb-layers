@@ -15,6 +15,9 @@
  */
 #ifndef ATB_SPEED_PLUGIN_ACLNN_NN_OPERATION_H
 #define ATB_SPEED_PLUGIN_ACLNN_NN_OPERATION_H
+
+#include <cstdint>
+
 #include <atb/operation_infra.h>
 #include "acl_nn_operation_cache.h"
 
@@ -43,6 +46,8 @@ public:
     /// \param context The context in which operation's preparation is performed.
     /// \return A status code that indicates whether the setup process was successful.
     atb::Status Setup(const atb::VariantPack &variantPack, uint64_t &workspaceSize, atb::Context *context) override;
+    atb::Status Setup(const atb::VariantPack &variantPack, uint64_t &workspaceSize, atb::Context *context,
+                      int32_t device_id);
     /// Operation execution process.
     ///
     /// Call `GetExecuteStream` from `context`. Call `UpdateAclNNVariantPack` to update tensor's device data.
@@ -70,7 +75,7 @@ protected:
     /// by calling `CreateAclNNOpCache`, then update both the `ExecutorManager` and `AclNNGlobalCache`.
     /// \param variantPack Operation's input and output tensor info.
     /// \return A status code that indicates whether `aclnnOpCache_` was successfully updated.
-    atb::Status UpdateAclNNOpCache(const atb::VariantPack &variantPack);
+    atb::Status UpdateAclNNOpCache(const atb::VariantPack &variantPack, int32_t device_id);
     /// Prepare the operation's input tensors and output tensors.
     ///
     /// This function calls `CreateAclNNInTensorVariantPack` and `CreateAclNNOutTensorVariantPack`.

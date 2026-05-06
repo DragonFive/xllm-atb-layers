@@ -16,6 +16,7 @@
 #ifndef ATB_SPEED_PLUGIN_ACLNN_NN_OPERATION_EXECUTOR_MANAGER_H
 #define ATB_SPEED_PLUGIN_ACLNN_NN_OPERATION_EXECUTOR_MANAGER_H
 
+#include <mutex>
 #include <map>
 #include <string>
 #include <aclnn/acl_meta.h>
@@ -50,6 +51,7 @@ public:
     std::string PrintExecutorCount();
 
 private:
+    mutable std::mutex mutex_;
     /// A map stores `aclOpExecutor` objects.
     ///
     /// Key is an `aclOpExecutor` object's address. Value is it's reference number.

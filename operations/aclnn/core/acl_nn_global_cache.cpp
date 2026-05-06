@@ -44,6 +44,7 @@ AclNNGlobalCache::AclNNGlobalCache()
 
 std::shared_ptr<AclNNOpCache> AclNNGlobalCache::GetGlobalCache(std::string opName, atb::VariantPack variantPack)
 {
+    std::lock_guard<std::mutex> lock(this->mutex_);
     // translatedOptranslatedGlobal Cachetranslated
     std::map<std::string, std::vector<std::shared_ptr<AclNNOpCache>>>::iterator it = \
         this->aclnnGlobalCache_.find(opName);
@@ -72,6 +73,7 @@ std::shared_ptr<AclNNOpCache> AclNNGlobalCache::GetGlobalCache(std::string opNam
 
 atb::Status AclNNGlobalCache::UpdateGlobalCache(std::string opName, std::shared_ptr<AclNNOpCache> cache)
 {
+    std::lock_guard<std::mutex> lock(this->mutex_);
     // translatedLocal CachetranslatedExecutortranslated,translatedGlobal Cache
     if (!cache->executorRepeatable) {
         ATB_SPEED_LOG_DEBUG("Plugin Op Cache: Op name[" << opName << "] not repeatable, do not update global cache");
@@ -112,6 +114,7 @@ atb::Status AclNNGlobalCache::UpdateGlobalCache(std::string opName, std::shared_
 
 std::string AclNNGlobalCache::PrintGlobalCache()
 {
+    std::lock_guard<std::mutex> lock(this->mutex_);
     std::stringstream ss;
     ss << "Plugin Op Cache: Global Cache Summary ";
     std::map<std::string, std::vector<std::shared_ptr<AclNNOpCache>>>::iterator it;

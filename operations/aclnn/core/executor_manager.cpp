@@ -23,6 +23,7 @@ namespace common {
 
 int ExecutorManager::IncreaseReference(aclOpExecutor *executor)
 {
+    std::lock_guard<std::mutex> lock(this->mutex_);
     std::map<aclOpExecutor *, int>::iterator it = this->executorCount_.find(executor);
     if (it == this->executorCount_.end()) {
         ATB_SPEED_LOG_DEBUG("Plugin Op Cache: Executor addr[" << executor << "] not found in ExecutorManager, add one");
@@ -39,6 +40,7 @@ int ExecutorManager::IncreaseReference(aclOpExecutor *executor)
 
 int ExecutorManager::DecreaseReference(aclOpExecutor *executor)
 {
+    std::lock_guard<std::mutex> lock(this->mutex_);
     std::map<aclOpExecutor *, int>::iterator it = this->executorCount_.find(executor);
     if (it == this->executorCount_.end()) {
         ATB_SPEED_LOG_ERROR("Plugin Op Cache: Executor addr[" << executor << "] not found in ExecutorManager");
@@ -59,6 +61,7 @@ int ExecutorManager::DecreaseReference(aclOpExecutor *executor)
 
 std::string ExecutorManager::PrintExecutorCount()
 {
+    std::lock_guard<std::mutex> lock(this->mutex_);
     std::stringstream ss;
     ss << "Plugin Op Cache: Executor Summary ";
     std::map<aclOpExecutor *, int>::iterator it;

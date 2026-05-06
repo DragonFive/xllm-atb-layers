@@ -19,6 +19,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <mutex>
 #include <atb/atb_infer.h>
 #include "acl_nn_operation_cache.h"
 #include "acl_nn_operation.h"
@@ -71,6 +72,7 @@ public:
     std::string PrintGlobalCache();
 
 private:
+    mutable std::mutex mutex_;
     /// An index maintains a record of the next available cache slot
     int nextUpdateIndex_ = 0;
     /// Maximum number of objects stored in the global cache

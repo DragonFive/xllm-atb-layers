@@ -15,6 +15,9 @@
  */
 #ifndef ATB_SPEED_PLUGIN_ACLNN_NN_OPERATION_LOCAL_CACHE_H
 #define ATB_SPEED_PLUGIN_ACLNN_NN_OPERATION_LOCAL_CACHE_H
+
+#include <cstdint>
+
 #include "acl_nn_tensor.h"
 
 namespace atb_speed {
@@ -44,6 +47,8 @@ struct AclNNOpCache {
     aclOpExecutor *aclExecutor = nullptr;
     /// An indicator shows whether the `aclOpExecutor` is repeatable.
     bool executorRepeatable = false;
+    /// The device id that owns the executor and shared cache entry.
+    int32_t device_id = -1;
     /// Size of the workspace to be allocated on the device.
     uint64_t workspaceSize;
     /// Update the device memory address in `aclTensor` objects when the device memory changes.

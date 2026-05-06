@@ -26,8 +26,17 @@ void AclNNOpCache::Destroy()
     ATB_SPEED_LOG_DEBUG("Plugin Op Cache: AclNNOpCache addr [" << (this) << "]destroy");
     if (this->aclExecutor == nullptr) { return; }
 
+    int32_t device_id = this->device_id;
+    if (device_id < 0) {
+        aclError ret = aclrtGetDevice(&device_id);
+        if (ret != ACL_SUCCESS) {
+            ATB_SPEED_LOG_ERROR("Plugin Op Cache: get current device failed when destroy executor, error:" << ret);
+            return;
+        }
+    }
+
     // ExecutorManagertranslated1
-    int count = GetSingleton<ExecutorManager>().DecreaseReference(this->aclExecutor);
+    int count = GetSingletonPerDevice<ExecutorManager>(device_id).DecreaseReference(this->aclExecutor);
     if (count != 0) { return; }  // translatedexecutortranslated0,translatedexecutortranslatedaclTensor
 
     // translatedaclExecutortranslated0,translateddestroy
