@@ -14,20 +14,44 @@
  * limitations under the License.
  */
 #include "workspace.h"
+
+#include <acl/acl.h>
+
+#include <stdexcept>
+
 #include "atb_speed/log.h"
 #include "buffer_device.h"
 
 namespace atb_speed {
+namespace {
+constexpr uint64_t kDefaultWorkspaceSize = 629145600;
 
-Workspace::Workspace()
+using WorkspaceCacheKey = std::pair<int32_t, uint64_t>;
+
+WorkspaceCacheKey GetWorkspaceCacheKey(int32_t device_id, uint64_t buffer_key)
 {
-    workspaceBuffer_[0].reset(new BufferDevice(629145600)); // 629145600 translated
+    return std::make_pair(device_id, buffer_key);
 }
+
+int32_t GetCurrentDeviceId()
+{
+    int32_t device_id = 0;
+    aclError ret = aclrtGetDevice(&device_id);
+    if (ret != ACL_SUCCESS) {
+        ATB_SPEED_LOG_ERROR("Workspace::GetWorkspaceBuffer get current device failed, error:" << ret);
+        throw std::runtime_error("aclrtGetDevice fail before get workspace buffer, please check plog.");
+    }
+    return device_id;
+}
+} // namespace
+
+Workspace::Workspace() {}
 
 Workspace::~Workspace() {}
 
 void Workspace::ClearCache()
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     for (auto& buff : std::as_const(workspaceBuffer_)) {
         buff.second->ClearBuffer();
     }
@@ -35,6 +59,7 @@ void Workspace::ClearCache()
 
 int32_t Workspace::GetCachedNum()
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     int32_t rt = 0;
     for (auto& buff : std::as_const(workspaceBuffer_)) {
         rt = rt + buff.second->GetCachedNum();
@@ -42,12 +67,16 @@ int32_t Workspace::GetCachedNum()
     return rt;
 }
 
-void *Workspace::GetWorkspaceBuffer(uint64_t bufferSize, uint32_t bufferKey)
+void *Workspace::GetWorkspaceBuffer(uint64_t bufferSize, uint64_t bufferKey)
 {
-    if (workspaceBuffer_.count(bufferKey) == 0) {
-        workspaceBuffer_[bufferKey].reset(new BufferDevice(bufferSize));
+    std::lock_guard<std::mutex> lock(mutex_);
+    int32_t device_id = GetCurrentDeviceId();
+    WorkspaceCacheKey cache_key = GetWorkspaceCacheKey(device_id, bufferKey);
+    if (workspaceBuffer_.count(cache_key) == 0) {
+        uint64_t initial_buffer_size = bufferSize > kDefaultWorkspaceSize ? bufferSize : kDefaultWorkspaceSize;
+        workspaceBuffer_[cache_key].reset(new BufferDevice(initial_buffer_size));
     }
-    return workspaceBuffer_[bufferKey]->GetBuffer(bufferSize);
+    return workspaceBuffer_[cache_key]->GetBuffer(bufferSize);
 }
 
 } // namespace atb_speed

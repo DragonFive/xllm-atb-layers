@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #include "operation_torch.h"
+#include <cstdint>
 #include <acl/acl.h>
 #include <torch/torch.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
@@ -27,6 +28,22 @@
 #include "operation_creator.h"
 
 namespace atb_speed {
+struct OperationExecuteContext {
+    atb::VariantPack variant_pack;
+    std::vector<torch::Tensor> input_tensors;
+    std::vector<torch::Tensor> output_tensors;
+    std::shared_ptr<atb::Context> context;
+    uint64_t workspace_size = 0;
+    void *workspace = nullptr;
+};
+
+namespace {
+uint64_t GetWorkspaceBufferKey(void *stream)
+{
+    return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(stream));
+}
+}  // namespace
+
 static uint64_t GetNewOpId()
 {
     static uint64_t opId = 0;
@@ -45,13 +62,13 @@ OperationTorch::OperationTorch(std::string opName) : opName_(opName), name_(opNa
         (blockingEnv != nullptr && std::string(blockingEnv) == "1"));
     ATB_SPEED_LOG_DEBUG("OperationTorch::OperationTorch, TASK_QUEUE_ENABLE:" << isTaskQueueEnable_ << ", opName:" <<
         opName << ", opId:" << opId_);
-    context_ = atb_speed::ContextFactory::GetAtbContext(Utils::GetCurrentStream());
 }
 
 OperationTorch::~OperationTorch()
 {
     operation_.reset();
     context_.reset();
+    stream_ = nullptr;
     atb_speed::ContextFactory::FreeAtbContext();
 }
 
@@ -74,6 +91,17 @@ void OperationTorch::SetParam(std::string param)
 
     operation_.reset(operation);
     ATB_SPEED_LOG_DEBUG(name_ << " set param end");
+}
+
+void OperationTorch::RefreshContext()
+{
+    void *current_stream = Utils::GetCurrentStream();
+    if (context_ != nullptr && stream_ == current_stream) {
+        return;
+    }
+
+    context_ = atb_speed::ContextFactory::GetAtbContext(current_stream);
+    stream_ = current_stream;
 }
 
 std::vector<torch::Tensor> OperationTorch::ExecuteImpl(std::vector<torch::Tensor> &atInTensors)
@@ -152,7 +180,6 @@ void OperationTorch::ExecuteOut(std::vector<torch::Tensor> atInTensors, std::vec
 void OperationTorch::ExecuteOutImpl(std::vector<torch::Tensor> &atInTensors, std::vector<torch::Tensor> &atOutTensors,
                                     const std::string &varaintPackParam)
 {
-    Clear();
     ATB_SPEED_LOG_DEBUG(name_ << " execute impl execCount:" << executeCount_);
     if (hostTensorBinder_) {
         nlohmann::json paramJson;
@@ -165,53 +192,64 @@ void OperationTorch::ExecuteOutImpl(std::vector<torch::Tensor> &atInTensors, std
         hostTensorBinder_->ParseParam(paramJson);
     }
 
-    BuildVariantPack(atInTensors, atOutTensors, variantPack_);
-
-    if (hostTensorBinder_) {
-        hostTensorBinder_->BindTensor(variantPack_);
+    RefreshContext();
+    if (!context_) {
+        ATB_SPEED_LOG_ERROR(name_ << " execute fail, context is null");
+        return;
     }
 
-    atb::Status st = operation_->Setup(variantPack_, workspaceSize_, context_.get());
+    std::shared_ptr<OperationExecuteContext> execute_context = std::make_shared<OperationExecuteContext>();
+    BuildVariantPack(atInTensors, atOutTensors, execute_context->variant_pack);
+    execute_context->input_tensors = atInTensors;
+    execute_context->output_tensors = atOutTensors;
+
+    if (hostTensorBinder_) {
+        hostTensorBinder_->BindTensor(execute_context->variant_pack);
+    }
+
+    atb::Status st = operation_->Setup(execute_context->variant_pack, execute_context->workspace_size, context_.get());
     if (st != 0) {
         ATB_SPEED_LOG_ERROR(name_ << " setup fail, not call execute, error code: " << st);
         return;
     }
 
-    ATB_SPEED_LOG_DEBUG(name_ << " get plan workspace size:" << workspaceSize_);
+    ATB_SPEED_LOG_DEBUG(name_ << " get plan workspace size:" << execute_context->workspace_size);
 
-    if (workspaceSize_ > 0) {
-        workspace_ = atb_speed::GetSingleton<atb_speed::Workspace>().GetWorkspaceBuffer(workspaceSize_);
+    if (execute_context->workspace_size > 0) {
+        execute_context->workspace = atb_speed::GetSingleton<atb_speed::Workspace>().GetWorkspaceBuffer(
+            execute_context->workspace_size, GetWorkspaceBufferKey(stream_));
     }
-
-    if (runTaskFunc_) {
-        ExecutePlanASync();
-    } else {
-        ExecutePlan();
-    }
-}
-
-atb::Status OperationTorch::ExecutePlan()
-{
-    atb::Status st = operation_->Execute(variantPack_, (uint8_t*)workspace_, workspaceSize_, context_.get());
+    execute_context->context = context_;
     executeCount_++;
-    return st;
+
+    if (runTaskFunc_) {
+        ExecutePlanASync(execute_context);
+    } else {
+        ExecutePlan(execute_context);
+    }
 }
 
-void OperationTorch::ExecutePlanASync()
+atb::Status OperationTorch::ExecutePlan(const std::shared_ptr<OperationExecuteContext> &execute_context) const
+{
+    return operation_->Execute(
+        execute_context->variant_pack,
+        static_cast<uint8_t *>(execute_context->workspace),
+        execute_context->workspace_size,
+        execute_context->context.get());
+}
+
+void OperationTorch::ExecutePlanASync(const std::shared_ptr<OperationExecuteContext> &execute_context) const
 {
     if (runTaskFunc_) {
-        runTaskFunc_(name_, [=]() {
-            return ExecutePlan();
+        atb::Operation *operation = operation_.get();
+        runTaskFunc_(name_, [execute_context, operation]() {
+            return operation->Execute(
+                execute_context->variant_pack,
+                static_cast<uint8_t *>(execute_context->workspace),
+                execute_context->workspace_size,
+                execute_context->context.get());
         });
     }
-}
-
-void OperationTorch::Clear()
-{
-    variantPack_.inTensors.clear();
-    variantPack_.outTensors.clear();
-    workspaceSize_ = 0;
-    workspace_ = nullptr;
 }
 
 void OperationTorch::CreateAtOutTensors(const std::vector<torch::Tensor> &atInTensors,

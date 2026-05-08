@@ -23,6 +23,8 @@
 #include "atb_speed/base/hosttensor_binder.h"
 
 namespace atb_speed {
+struct OperationExecuteContext;
+
 class OperationTorch : public torch::CustomClassHolder {
 public:
     using Task = std::function<int()>;
@@ -45,10 +47,10 @@ private:
     std::vector<torch::Tensor> ExecuteImpl(std::vector<torch::Tensor> &atInTensors);
     void BuildVariantPack(std::vector<torch::Tensor> &atInTensors, std::vector<torch::Tensor> &atOutTensors,
                           atb::VariantPack &variantPack);
+    void RefreshContext();
     void RunTask(std::string taskName, std::function<int()> task) const;
-    atb::Status ExecutePlan();
-    void Clear();
-    void ExecutePlanASync();
+    atb::Status ExecutePlan(const std::shared_ptr<OperationExecuteContext> &execute_context) const;
+    void ExecutePlanASync(const std::shared_ptr<OperationExecuteContext> &execute_context) const;
 
 private:
     std::string opName_;
@@ -61,9 +63,7 @@ private:
     bool isTaskQueueEnable_ = false;
     std::unique_ptr<atb_speed::HostTensorBinder> hostTensorBinder_;
     std::shared_ptr<atb::Context> context_;
-    atb::VariantPack variantPack_;
-    uint64_t workspaceSize_ = 0;
-    void *workspace_ = nullptr;
+    void *stream_ = nullptr;
     RunTaskFunc runTaskFunc_ = nullptr;
 };
 }

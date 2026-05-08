@@ -15,15 +15,19 @@
  */
 #include "atb_speed/base/context_factory.h"
 #include <thread>
+#include <unordered_map>
 #include "atb_speed/log.h"
 #include "atb_speed/utils/singleton.h"
 #include "atb_speed/utils/config.h"
 
 namespace atb_speed {
+namespace {
+using ContextMap = std::unordered_map<void *, std::shared_ptr<atb::Context>>;
+
+thread_local ContextMap g_localContexts;
+}  // namespace
 
 const int MAX_STREAM_NUM = 2;
-
-thread_local std::shared_ptr<atb::Context> g_localContext;
 
 bool ContextFactory::cacheWorkspace_ = false;
 
@@ -55,10 +59,12 @@ std::vector<aclrtStream> ContextFactory::GetSubStreams()
 
 std::shared_ptr<atb::Context> ContextFactory::GetAtbContext(void *stream)
 {
-    if (g_localContext) {
-    ATB_SPEED_LOG_DEBUG("ContextFactory return localContext");
-    return g_localContext;
+    auto context_it = g_localContexts.find(stream);
+    if (context_it != g_localContexts.end()) {
+        ATB_SPEED_LOG_DEBUG("ContextFactory return localContext");
+        return context_it->second;
     }
+
     ATB_SPEED_LOG_DEBUG("ContextFactory create atb::Context start");
     atb::Context *context = nullptr;
     atb::Status st = atb::CreateContext(&context);
@@ -76,24 +82,27 @@ std::shared_ptr<atb::Context> ContextFactory::GetAtbContext(void *stream)
         }
     }
 
-    std::shared_ptr<atb::Context> tmpLocalContext(context, [](atb::Context* context) {atb::DestroyContext(context);});
-    g_localContext = tmpLocalContext;
+    std::shared_ptr<atb::Context> local_context(
+        context, [](atb::Context *context) { atb::DestroyContext(context); });
+    g_localContexts[stream] = local_context;
 
-    return g_localContext;
+    return local_context;
 }
 
 void ContextFactory::FreeAtbContext()
 {
     ATB_SPEED_LOG_DEBUG("ContextFactory FreeAtbContext start.");
-    if (!g_localContext) {
+    if (g_localContexts.empty()) {
         return;
     }
-    
-    ATB_SPEED_LOG_DEBUG("ContextFactory localContext use_count: " << g_localContext.use_count());
-    if (g_localContext.use_count() != 1) {
-        return;
+
+    for (auto context_it = g_localContexts.begin(); context_it != g_localContexts.end();) {
+        ATB_SPEED_LOG_DEBUG("ContextFactory localContext use_count: " << context_it->second.use_count());
+        if (context_it->second.use_count() == 1) {
+            context_it = g_localContexts.erase(context_it);
+        } else {
+            ++context_it;
+        }
     }
-    ATB_SPEED_LOG_DEBUG("ContextFactory localContext reset.");
-    g_localContext.reset();
 }
-}
+} 

@@ -16,8 +16,10 @@
 #ifndef ATB_SPEED_UTILS_WORKSPACE_H
 #define ATB_SPEED_UTILS_WORKSPACE_H
 #include <cstdint>
-#include <memory>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <utility>
 #include "buffer_base.h"
 
 namespace atb_speed {
@@ -26,12 +28,13 @@ class Workspace {
 public:
     Workspace();
     ~Workspace();
-    void *GetWorkspaceBuffer(uint64_t bufferSize, uint32_t bufferKey = 0);
+    void *GetWorkspaceBuffer(uint64_t bufferSize, uint64_t bufferKey = 0);
     void ClearCache();
     int32_t GetCachedNum();
 
 private:
-    std::map<uint32_t, std::unique_ptr<BufferBase>> workspaceBuffer_;
+    std::mutex mutex_;
+    std::map<std::pair<int32_t, uint64_t>, std::unique_ptr<BufferBase>> workspaceBuffer_;
 };
 } // namespace atb_speed
 #endif
