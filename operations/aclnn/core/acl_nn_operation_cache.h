@@ -17,11 +17,15 @@
 #define ATB_SPEED_PLUGIN_ACLNN_NN_OPERATION_LOCAL_CACHE_H
 
 #include <cstdint>
+#include <memory>
+#include <thread>
 
 #include "acl_nn_tensor.h"
 
 namespace atb_speed {
 namespace common {
+
+class ExecutorManager;
 
 /// Information about input and output tensors of an AclNN operation.
 struct AclNNVariantPack {
@@ -49,8 +53,14 @@ struct AclNNOpCache {
     bool executorRepeatable = false;
     /// The device id that owns the executor and shared cache entry.
     int32_t device_id = -1;
+    /// Owner manager used by the thread-local ACLNN cache mode. It lets a
+    /// cache be destroyed safely even if the owning worker thread has exited.
+    std::shared_ptr<ExecutorManager> executorManager = nullptr;
+    /// Thread that created or acquired this cache in thread-local cache mode.
+    std::thread::id ownerThreadId;
+    bool ownerThreadRecorded = false;
     /// Size of the workspace to be allocated on the device.
-    uint64_t workspaceSize;
+    uint64_t workspaceSize = 0;
     /// Update the device memory address in `aclTensor` objects when the device memory changes.
     ///
     /// \param variantPack Information about input and output tensors of an AclNN operation.

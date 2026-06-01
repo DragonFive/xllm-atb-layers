@@ -13,6 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <cstdlib>
+#include <memory>
+#include <string>
+#include <thread>
+#include <unordered_map>
+
 #include "atb_speed/log.h"
 #include "atb_speed/utils/timer.h"
 #include "atb_speed/utils/statistic.h"
@@ -26,6 +32,17 @@ namespace atb_speed {
 namespace common {
 
 namespace {
+constexpr const char *ACLNN_THREAD_LOCAL_CACHE_ENV = "XLLM_ATB_ACLNN_THREAD_LOCAL_CACHE";
+
+bool IsThreadLocalAclNNCacheEnabled()
+{
+    static const bool enabled = []() {
+        const char *env = std::getenv(ACLNN_THREAD_LOCAL_CACHE_ENV);
+        return env != nullptr && std::string(env) == "1";
+    }();
+    return enabled;
+}
+
 atb::Status GetCurrentDeviceId(int32_t &device_id)
 {
     aclError ret = aclrtGetDevice(&device_id);
@@ -34,6 +51,57 @@ atb::Status GetCurrentDeviceId(int32_t &device_id)
         return atb::ERROR_CANN_ERROR;
     }
     return atb::NO_ERROR;
+}
+
+std::shared_ptr<ExecutorManager> GetThreadLocalAclNNExecutorManager(int32_t device_id)
+{
+    thread_local std::unordered_map<int32_t, std::shared_ptr<ExecutorManager>> managers;
+    auto it = managers.find(device_id);
+    if (it != managers.end()) {
+        return it->second;
+    }
+
+    auto manager = std::make_shared<ExecutorManager>();
+    managers.emplace(device_id, manager);
+    return manager;
+}
+
+ExecutorManager &GetAclNNExecutorManager(int32_t device_id)
+{
+    if (IsThreadLocalAclNNCacheEnabled()) {
+        return *GetThreadLocalAclNNExecutorManager(device_id);
+    }
+    return GetSingletonPerDevice<ExecutorManager>(device_id);
+}
+
+ExecutorManager &GetAclNNExecutorManager(const std::shared_ptr<AclNNOpCache> &cache, int32_t device_id)
+{
+    if (cache != nullptr && cache->executorManager != nullptr) {
+        return *cache->executorManager;
+    }
+    return GetAclNNExecutorManager(device_id);
+}
+
+void BindThreadLocalAclNNOpCacheOwner(const std::shared_ptr<AclNNOpCache> &cache, int32_t device_id)
+{
+    if (!IsThreadLocalAclNNCacheEnabled() || cache == nullptr) {
+        return;
+    }
+
+    cache->executorManager = GetThreadLocalAclNNExecutorManager(device_id);
+    cache->ownerThreadId = std::this_thread::get_id();
+    cache->ownerThreadRecorded = true;
+}
+
+bool IsReusableLocalAclNNOpCache(const std::shared_ptr<AclNNOpCache> &cache, int32_t device_id)
+{
+    if (cache == nullptr || cache->device_id != device_id) {
+        return false;
+    }
+    if (!IsThreadLocalAclNNCacheEnabled()) {
+        return true;
+    }
+    return cache->ownerThreadRecorded && cache->ownerThreadId == std::this_thread::get_id();
 }
 } // namespace
 
@@ -52,6 +120,10 @@ std::string AclNNOperation::GetName() const { return this->opName_; }
 
 void AclNNOperation::DestroyOperation() const
 {
+    if (this->operationDestroyed_ || this->aclnnOpCache_ == nullptr) {
+        return;
+    }
+    this->operationDestroyed_ = true;
     this->aclnnOpCache_->Destroy();
 }
 
@@ -88,7 +160,7 @@ atb::Status AclNNOperation::Setup(const atb::VariantPack &variantPack, uint64_t 
     workspaceSize = this->aclnnOpCache_->workspaceSize;
 
     ATB_SPEED_LOG_DEBUG(GetSingletonPerDevice<AclNNGlobalCache>(device_id).PrintGlobalCache());
-    ATB_SPEED_LOG_DEBUG(GetSingletonPerDevice<ExecutorManager>(device_id).PrintExecutorCount());
+    ATB_SPEED_LOG_DEBUG(GetAclNNExecutorManager(this->aclnnOpCache_, device_id).PrintExecutorCount());
     return atb::NO_ERROR;
 }
 
@@ -99,7 +171,7 @@ atb::Status AclNNOperation::UpdateAclNNOpCache(const atb::VariantPack &variantPa
 
     // 1. translatedLocal CachetranslatedExecutortranslated
     ATB_SPEED_LOG_DEBUG("Plugin Op Cache: Local Cache call IsVariankPackEqual");
-    if (this->aclnnOpCache_->executorRepeatable && \
+    if (IsReusableLocalAclNNOpCache(this->aclnnOpCache_, device_id) && this->aclnnOpCache_->executorRepeatable && \
         IsVariankPackEqual(this->aclnnOpCache_->aclnnVariantPack, variantPack)) {
         // Local Cachetranslated
         ATB_SPEED_LOG_DEBUG("Plugin Op Cache: Op name[" << this->opName_ << "] Op addr[" <<
@@ -108,23 +180,27 @@ atb::Status AclNNOperation::UpdateAclNNOpCache(const atb::VariantPack &variantPa
         return atb::NO_ERROR;
     }
 
-    // 2. translatedGlobal CachetranslatedExecutortranslated
-    std::shared_ptr<AclNNOpCache> globalCache = \
-        GetSingletonPerDevice<AclNNGlobalCache>(device_id).GetGlobalCache(this->opName_, variantPack);
-    if (globalCache != nullptr) {
-        // Global Cachetranslated
-        ATB_SPEED_LOG_DEBUG("Plugin Op Cache: Op name[" << this->opName_ << "] Op addr[" << (this) << "] Cache addr["
-            << globalCache.get() << "] Executor addr[" << globalCache->aclExecutor << "] Global Cache Hit");
-        // 2.1 translatedLocal Cache
-        ATB_SPEED_LOG_DEBUG("Plugin Op Cache: destroy local cache before switching to global cache");
-        this->aclnnOpCache_->Destroy();
-        // 2.2 translatedLocal Cache
-        this->aclnnOpCache_ = globalCache;
-        // 2.3 translatedExecutorManager
-        int count = GetSingletonPerDevice<ExecutorManager>(device_id).IncreaseReference(this->aclnnOpCache_->aclExecutor);
-        ATB_SPEED_LOG_DEBUG("Plugin Op Cache: Op name[" << this->opName_ << "] Executor addr[" <<
-            this->aclnnOpCache_->aclExecutor << "] count update to " << count);
-        return atb::NO_ERROR;
+    if (!IsThreadLocalAclNNCacheEnabled()) {
+        // 2. translatedGlobal CachetranslatedExecutortranslated
+        std::shared_ptr<AclNNOpCache> globalCache = \
+            GetSingletonPerDevice<AclNNGlobalCache>(device_id).GetGlobalCache(this->opName_, variantPack);
+        if (globalCache != nullptr) {
+            // Global Cachetranslated
+            ATB_SPEED_LOG_DEBUG("Plugin Op Cache: Op name[" << this->opName_ << "] Op addr[" << (this)
+                << "] Cache addr[" << globalCache.get() << "] Executor addr[" << globalCache->aclExecutor
+                << "] Global Cache Hit");
+            // 2.1 translatedLocal Cache
+            ATB_SPEED_LOG_DEBUG("Plugin Op Cache: destroy local cache before switching to global cache");
+            this->aclnnOpCache_->Destroy();
+            // 2.2 translatedLocal Cache
+            this->aclnnOpCache_ = globalCache;
+            // 2.3 translatedExecutorManager
+            int count = GetAclNNExecutorManager(this->aclnnOpCache_, device_id)
+                            .IncreaseReference(this->aclnnOpCache_->aclExecutor);
+            ATB_SPEED_LOG_DEBUG("Plugin Op Cache: Op name[" << this->opName_ << "] Executor addr[" <<
+                this->aclnnOpCache_->aclExecutor << "] count update to " << count);
+            return atb::NO_ERROR;
+        }
     }
 
     // 3. Local CachetranslatedGlobal Cachetranslated
@@ -134,6 +210,7 @@ atb::Status AclNNOperation::UpdateAclNNOpCache(const atb::VariantPack &variantPa
     // 3.2 translatedvariantPack,translatedaclnnOpCache_,translatedWorkSpacetranslatedExecutor
     this->aclnnOpCache_ = std::make_shared<AclNNOpCache>();
     this->aclnnOpCache_->device_id = device_id;
+    BindThreadLocalAclNNOpCacheOwner(this->aclnnOpCache_, device_id);
     int ret = CreateAclNNOpCache(variantPack);
     if (ret != 0) {
         ATB_SPEED_LOG_ERROR(this->opName_ << " call CreateAclNNOpCache fail, error:" << ret);
@@ -143,12 +220,15 @@ atb::Status AclNNOperation::UpdateAclNNOpCache(const atb::VariantPack &variantPa
         (this) << "] Cache addr[" << this->aclnnOpCache_.get() << "] Executor addr[" <<
         this->aclnnOpCache_->aclExecutor << "] create Local Cache");
     // 3.3 translatedExecutorManager,translatedExecutor,counttranslated1
-    int count = GetSingletonPerDevice<ExecutorManager>(device_id).IncreaseReference(this->aclnnOpCache_->aclExecutor);
+    int count = GetAclNNExecutorManager(this->aclnnOpCache_, device_id)
+                    .IncreaseReference(this->aclnnOpCache_->aclExecutor);
     ATB_SPEED_LOG_DEBUG("Plugin Op Cache: Op name[" << this->opName_ << "] increase Executor addr[" <<
         this->aclnnOpCache_->aclExecutor << "] count update to " << count);
 
-    // 3.4 translatedGlobal Cache(translatedGlobal Cachetranslated)
-    GetSingletonPerDevice<AclNNGlobalCache>(device_id).UpdateGlobalCache(this->opName_, this->aclnnOpCache_);
+    if (!IsThreadLocalAclNNCacheEnabled()) {
+        // 3.4 translatedGlobal Cache(translatedGlobal Cachetranslated)
+        GetSingletonPerDevice<AclNNGlobalCache>(device_id).UpdateGlobalCache(this->opName_, this->aclnnOpCache_);
+    }
 
     return atb::NO_ERROR;
 }

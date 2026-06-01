@@ -20,23 +20,39 @@
 
 namespace atb_speed {
 namespace common {
+namespace {
+
+ExecutorManager *GetAclNNExecutorManager(AclNNOpCache *cache)
+{
+    if (cache != nullptr && cache->executorManager != nullptr) {
+        return cache->executorManager.get();
+    }
+
+    int32_t device_id = cache == nullptr ? -1 : cache->device_id;
+    if (device_id < 0) {
+        aclError ret = aclrtGetDevice(&device_id);
+        if (ret != ACL_SUCCESS) {
+            ATB_SPEED_LOG_ERROR("Plugin Op Cache: get current device failed when destroy executor, error:" << ret);
+            return nullptr;
+        }
+    }
+
+    return &GetSingletonPerDevice<ExecutorManager>(device_id);
+}
+
+} // namespace
 
 void AclNNOpCache::Destroy()
 {
     ATB_SPEED_LOG_DEBUG("Plugin Op Cache: AclNNOpCache addr [" << (this) << "]destroy");
     if (this->aclExecutor == nullptr) { return; }
 
-    int32_t device_id = this->device_id;
-    if (device_id < 0) {
-        aclError ret = aclrtGetDevice(&device_id);
-        if (ret != ACL_SUCCESS) {
-            ATB_SPEED_LOG_ERROR("Plugin Op Cache: get current device failed when destroy executor, error:" << ret);
-            return;
-        }
-    }
-
     // ExecutorManagertranslated1
-    int count = GetSingletonPerDevice<ExecutorManager>(device_id).DecreaseReference(this->aclExecutor);
+    ExecutorManager *executor_manager = GetAclNNExecutorManager(this);
+    if (executor_manager == nullptr) {
+        return;
+    }
+    int count = executor_manager->DecreaseReference(this->aclExecutor);
     if (count != 0) { return; }  // translatedexecutortranslated0,translatedexecutortranslatedaclTensor
 
     // translatedaclExecutortranslated0,translateddestroy
