@@ -697,6 +697,7 @@ ConstructDecodeKVCacheNode(atb::GraphParam &opGraph,
   atb::Node xAttentionNode;
   atb_speed::common::AclNNXAttentionParam xAttentionParam;
   xAttentionParam.layerId = param.layerId;
+  xAttentionParam.scaleValue = param.selfAttentionParam.qkScale;
   xAttentionNode.operation = new atb_speed::common::XAttentionOperation(
       "XAttentionNode", xAttentionParam);
   // Now,in_decode_k_cache is the shared k_cache,in_k_cache is unshared k_cache.
