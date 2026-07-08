@@ -52,6 +52,7 @@ struct AclNNFusedInferAttnParam {
 
     bool enablePa = false;
     int64_t blockSize = 0;
+    bool useActualSeqLengths = true;
     
     std::string ToString() const
     {
@@ -66,6 +67,7 @@ struct AclNNFusedInferAttnParam {
         oss << "  numKeyValueHeads: " << numKeyValueHeads << std::endl;
         oss << "  sparseMode: "  << sparseMode << std::endl;
         oss << "  innerPrecise: " << innerPrecise << std::endl;
+        oss << "  useActualSeqLengths: " << useActualSeqLengths << std::endl;
         oss << "}";
         return oss.str();
     }

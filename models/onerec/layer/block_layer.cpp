@@ -547,6 +547,7 @@ void SetCrossAttentionParam(
   fusionAttentionParam.aclnnFusedInferAttnParam.numKeyValueHeads =
       param.numKeyValueHeadsPerRank;
   fusionAttentionParam.aclnnFusedInferAttnParam.inputLayout = "BSND";
+  fusionAttentionParam.aclnnFusedInferAttnParam.useActualSeqLengths = false;
   const double cross_attention_scale =
       param.useAttentionScaling
           ? static_cast<double>(param.hiddenSizePerAttentionHead)

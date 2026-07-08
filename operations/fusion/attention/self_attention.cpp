@@ -847,9 +847,6 @@ int64_t ConstructOneRecCrossFusedInferAttentionNode(
   CHECK_OPERATION_STATUS_RETURN(ValidateRequiredTensor(
       tensorMap, "in_cross_v_cache",
       "ConstructOneRecCrossFusedInferAttentionNode"));
-  CHECK_OPERATION_STATUS_RETURN(ValidateRequiredTensor(
-      tensorMap, "cross_kv_len",
-      "ConstructOneRecCrossFusedInferAttentionNode"));
   ATB_SPEED_LOG_ERROR(
       "OneRecCrossAttention ConstructOneRecCrossFusedInferAttentionNode: "
       << "isOneRecCrossAttention=" << param.isOneRecCrossAttention
@@ -860,7 +857,6 @@ int64_t ConstructOneRecCrossFusedInferAttentionNode(
       GetTensorIdx(tensorMap, "intermediate_q"),
       GetTensorIdx(tensorMap, "in_cross_k_cache"),
       GetTensorIdx(tensorMap, "in_cross_v_cache"),
-      GetTensorIdx(tensorMap, "cross_kv_len"),
   };
   selfAttentionNode.operation =
       new atb_speed::common::FusedInferAttentionV2Operation(
