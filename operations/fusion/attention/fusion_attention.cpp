@@ -406,17 +406,6 @@ std::map<std::string, uint32_t> ConstructOneRecCrossAttentionTensorMap(
   ConstructAttentionQuantTensorMap(param, attnInTensorCandidates,
                                    attnIntermediateTensorCandidates,
                                    inTensorList, intermediateTensorList);
-  if (param.attnBackend == atb_speed::common::OpBackend::ACLNN &&
-      !stop_after_qkv && !stop_after_kv_only && !stop_after_k_only &&
-      !stop_with_identity_k && !stop_with_identity_v &&
-      !stop_with_identity_kv) {
-    // Align with xllm_rec: cross-attention only needs one lightweight
-    // internal sink for the bs probe node. Reusing the full FIA intermediate
-    // set here leaves unassigned tensors in the graph because the cross-attn
-    // path never produces intermediate_self_attention_bsnd.
-    intermediateTensorList.push_back("intermediate_q_bsnd");
-  }
-
   if (param.supportLora) {
     if (param.useImMask) {
       AddTensorToList(attnInTensorCandidates, "lora_with_mask", inTensorList);

@@ -16,7 +16,6 @@
 #include "operations/fusion/attention/self_attention.h"
 #include "atb_speed/utils/check_util.h"
 #include "operations/aclnn/ops/attn_operation.h"
-#include "operations/aclnn/ops/cast_operation.h"
 #include "operations/aclnn/ops/dequant_rope_quant_kvcache_operation.h"
 #include "operations/aclnn/ops/flash_attention_score_operation.h"
 #include "operations/aclnn/ops/reshape_decode_kv_cache_operation.h"
@@ -65,26 +64,6 @@ int64_t AddSelfAttention(atb::GraphParam &opGraph,
       CHECK_OPERATION_STATUS_RETURN(
           AddFaKVCacheOperation(opGraph, param, tensorMap));
     }
-  }
-  if (param.attnBackend == atb_speed::common::OpBackend::ACLNN &&
-      param.isOneRecCrossAttention) {
-    atb::Node bsProbeNode;
-    atb_speed::common::AclNNCastParam castParam;
-    castParam.dtype = ACL_FLOAT16;
-    bsProbeNode.operation =
-        new atb_speed::common::CastOperation("CastOperation", castParam);
-    bsProbeNode.inTensorIds = {GetTensorIdx(tensorMap, "cross_kv_len")};
-    bsProbeNode.outTensorIds = {GetTensorIdx(tensorMap, "intermediate_q_bsnd")};
-    bsProbeNode.inTensorReshapeFuncs.resize(bsProbeNode.inTensorIds.size());
-    bsProbeNode.inTensorReshapeFuncs[0] = [=](const atb::Dims &oldShape,
-                                              atb::Dims &newShape) {
-      newShape.dimNum = oldShape.dimNum;
-      *param.bs = (oldShape.dimNum >= 1) ? oldShape.dims[0] : 1;
-      for (int32_t i = 0; i < newShape.dimNum; ++i) {
-        newShape.dims[i] = oldShape.dims[i];
-      }
-    };
-    opGraph.nodes.push_back(bsProbeNode);
   }
   // SelfAttentionNode
   atb::Node selfAttentionNode;
