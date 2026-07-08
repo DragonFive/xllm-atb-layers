@@ -271,7 +271,7 @@ ConstructTensorMap(const BlockLayerParam &param, uint32_t &inTensorNum,
     if (use_prefill_only && !param.enableSplitFuse && !param.isFA) {
       // In OneRec prefill-only + ACLNN FIA path, cross-attn does not consume
       // in_cross_attn_seq_len / in_cross_attn_block_tables /
-      // in_cross_attn_slots. Only keep cross_kv_len for the bs probe node.
+      // in_cross_attn_slots.
       inTensorList.push_back("cross_kv_len");
     } else {
       atb_speed::common::AddTensorToList(oneRecLayerInTensorCandidates,
@@ -879,6 +879,19 @@ int64_t AddCrossAttention(atb::Node &crossAttentionNode,
 
   crossAttentionNode.inTensorIds =
       atb_speed::common::GetTensorIdxList(tensorMap, crossAttnInTensorNames);
+  crossAttentionNode.inTensorReshapeFuncs.resize(
+      crossAttentionNode.inTensorIds.size());
+  for (size_t i = 0; i < crossAttnInTensorNames.size(); ++i) {
+    if (crossAttnInTensorNames[i] == "cross_kv_len") {
+      crossAttentionNode.inTensorReshapeFuncs.at(i) =
+          [bs = fusionAttentionParam.bs](const atb::Dims &oldShape,
+                                         atb::Dims &newShape) {
+            *bs = (oldShape.dimNum >= 1) ? oldShape.dims[0] : 1;
+            newShape = oldShape;
+          };
+      break;
+    }
+  }
   if (crossAttnIsPrefill) {
     if (param.use_moe && param.enableIntraLayerAddNorm) {
       crossAttentionNode.outTensorIds = atb_speed::common::GetTensorIdxList(
