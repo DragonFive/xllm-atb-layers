@@ -38,7 +38,8 @@ bool DebugStopOneRecCrossLayer0AfterQkv(
   if (flag == nullptr || std::string(flag) != "1") {
     return false;
   }
-  return param.isOneRecCrossAttention && param.isPrefill && param.layerId == 0;
+  return param.isOneRecCrossAttention && param.isPrefill && param.layerId == 0 &&
+         !param.enableCrossAttentionKernel;
 }
 
 template <typename NormParamType>
@@ -49,7 +50,8 @@ bool DebugStopOneRecCrossLayer0AfterKvOnly(
   if (flag == nullptr || std::string(flag) != "1") {
     return false;
   }
-  return param.isOneRecCrossAttention && param.isPrefill && param.layerId == 0;
+  return param.isOneRecCrossAttention && param.isPrefill && param.layerId == 0 &&
+         !param.enableCrossAttentionKernel;
 }
 
 template <typename NormParamType>
@@ -60,7 +62,8 @@ bool DebugStopOneRecCrossLayer0AfterKOnly(
   if (flag == nullptr || std::string(flag) != "1") {
     return false;
   }
-  return param.isOneRecCrossAttention && param.isPrefill && param.layerId == 0;
+  return param.isOneRecCrossAttention && param.isPrefill && param.layerId == 0 &&
+         !param.enableCrossAttentionKernel;
 }
 
 template <typename NormParamType>
@@ -71,7 +74,8 @@ bool DebugStopOneRecCrossLayer0WithIdentityK(
   if (flag == nullptr || std::string(flag) != "1") {
     return false;
   }
-  return param.isOneRecCrossAttention && param.isPrefill && param.layerId == 0;
+  return param.isOneRecCrossAttention && param.isPrefill && param.layerId == 0 &&
+         !param.enableCrossAttentionKernel;
 }
 
 template <typename NormParamType>
@@ -82,7 +86,8 @@ bool DebugStopOneRecCrossLayer0WithIdentityV(
   if (flag == nullptr || std::string(flag) != "1") {
     return false;
   }
-  return param.isOneRecCrossAttention && param.isPrefill && param.layerId == 0;
+  return param.isOneRecCrossAttention && param.isPrefill && param.layerId == 0 &&
+         !param.enableCrossAttentionKernel;
 }
 
 template <typename NormParamType>
@@ -93,7 +98,8 @@ bool DebugStopOneRecCrossLayer0WithIdentityKv(
   if (flag == nullptr || std::string(flag) != "1") {
     return false;
   }
-  return param.isOneRecCrossAttention && param.isPrefill && param.layerId == 0;
+  return param.isOneRecCrossAttention && param.isPrefill && param.layerId == 0 &&
+         !param.enableCrossAttentionKernel;
 }
 
 } // namespace
@@ -300,6 +306,8 @@ std::map<std::string, uint32_t> ConstructOneRecCrossAttentionTensorMap(
   auto attnIntermediateTensorCandidates = GetAttnIntermediateTensorCandidates();
   const bool isOneRecCrossPrefill =
       param.isPrefill && param.isOneRecCrossAttention;
+  const bool useOneRecCrossBlockCache =
+      param.isOneRecCrossAttention && param.enableCrossAttentionKernel;
   const bool stop_after_qkv = DebugStopOneRecCrossLayer0AfterQkv(param);
   const bool stop_after_kv_only = DebugStopOneRecCrossLayer0AfterKvOnly(param);
   const bool stop_after_k_only = DebugStopOneRecCrossLayer0AfterKOnly(param);
@@ -354,6 +362,17 @@ std::map<std::string, uint32_t> ConstructOneRecCrossAttentionTensorMap(
           "in_encoder_output",          "in_k_cache",   "in_v_cache",
           "intermediate_self_attn_out", "cross_kv_len",
       };
+    } else if (useOneRecCrossBlockCache) {
+      stageSpecific = {
+          "in_encoder_output",
+          "in_cross_k_cache",
+          "in_cross_v_cache",
+          "in_cross_attn_slots",
+          "in_cross_attn_seq_len",
+          "in_cross_attn_block_tables",
+          "intermediate_self_attn_out",
+          "cross_kv_len",
+      };
     } else {
       stageSpecific = {
           "in_encoder_output",
@@ -394,13 +413,18 @@ std::map<std::string, uint32_t> ConstructOneRecCrossAttentionTensorMap(
           ? std::vector<std::string>{}
           : stop_after_qkv
           ? std::vector<std::string>{"intermediate_q"}
-          : ((!param.isPrefill || isOneRecCrossPrefill)
+          : (useOneRecCrossBlockCache && param.isPrefill
+                 ? std::vector<std::string>{"intermediate_q",
+                                             "intermediate_k",
+                                             "intermediate_v",
+                                             "intermediate_self_attention"}
+                 : ((!param.isPrefill || isOneRecCrossPrefill)
                  ? std::vector<std::string>{"intermediate_q",
                                             "intermediate_self_attention"}
                  : std::vector<std::string>{"intermediate_q",
                                             "intermediate_k",
                                             "intermediate_v",
-                                            "intermediate_self_attention"});
+                                            "intermediate_self_attention"}));
   std::vector<std::string> outTensorList = {"out"};
 
   ConstructAttentionQuantTensorMap(param, attnInTensorCandidates,
@@ -416,7 +440,7 @@ std::map<std::string, uint32_t> ConstructOneRecCrossAttentionTensorMap(
     AddTensorToList(attnInTensorCandidates, "add_norm", inTensorList);
     outTensorList.push_back("out_add");
   }
-  if (isOneRecCrossPrefill) {
+  if (isOneRecCrossPrefill && !useOneRecCrossBlockCache) {
     outTensorList.push_back("in_cross_k_cache");
     outTensorList.push_back("in_cross_v_cache");
   }
@@ -1376,7 +1400,10 @@ AddCrossAttnQKVProjectionNodes(const FusionAttentionParam<NormParamType> &param,
       }
       kProjectionNode.inTensorIds = GetTensorIdxList(tensorMap, kInTensor);
       kProjectionNode.outTensorIds = {
-          GetTensorIdx(tensorMap, "in_cross_k_cache")};
+          GetTensorIdx(tensorMap,
+                       param.enableCrossAttentionKernel
+                           ? "intermediate_k"
+                           : "in_cross_k_cache")};
       opGraph.nodes.push_back(kProjectionNode);
       if (stop_after_k_only) {
         return atb::NO_ERROR;
@@ -1429,7 +1456,10 @@ AddCrossAttnQKVProjectionNodes(const FusionAttentionParam<NormParamType> &param,
       }
       vProjectionNode.inTensorIds = GetTensorIdxList(tensorMap, vInTensor);
       vProjectionNode.outTensorIds = {
-          GetTensorIdx(tensorMap, "in_cross_v_cache")};
+          GetTensorIdx(tensorMap,
+                       param.enableCrossAttentionKernel
+                           ? "intermediate_v"
+                           : "in_cross_v_cache")};
       opGraph.nodes.push_back(vProjectionNode);
     }
   } else {
@@ -2130,7 +2160,8 @@ atb::Status CrossAttention(const FusionAttentionParam<NormParamType> &param,
         if (param.enableAddNorm) {
           outTensorDescs.at(1) = inTensorDescs.at(0);
         }
-        if (param.isPrefill && param.isOneRecCrossAttention) {
+        if (param.isPrefill && param.isOneRecCrossAttention &&
+            !param.enableCrossAttentionKernel) {
           uint32_t outIndex = param.enableAddNorm ? 2 : 1;
           outTensorDescs.at(outIndex) = inTensorDescs.at(encoderOutputIdx);
           outTensorDescs.at(outIndex + 1) = inTensorDescs.at(encoderOutputIdx);

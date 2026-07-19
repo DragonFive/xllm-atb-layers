@@ -281,11 +281,11 @@ ConstructTensorMap(const BlockLayerParam &param, uint32_t &inTensorNum,
       atb_speed::common::AddTensorToList(oneRecLayerInTensorCandidates,
                                          "decode_kv_cache", inTensorList);
     }
-    // In enableOneRecPrefillOnly + first prefill (emptyCrossAttn=true),
-    // cross-attn generates K/V cache. ATB graph forbids writing to graph
-    // inputs, so we must treat cross-attn KV cache as graph outputs.
+    // The legacy dense first-prefill path exposes generated Cross K/V as graph
+    // outputs. OneRec xAttention instead updates physical PA cache inputs via
+    // ReshapeAndCache.
     const bool expose_cross_attn_kv_cache_as_output =
-        effective_cross_attn_is_prefill;
+        effective_cross_attn_is_prefill && !param.use_xattn;
     if (expose_cross_attn_kv_cache_as_output) {
       atb_speed::common::AddTensorToList(oneRecLayerInTensorCandidates,
                                          "cross_attn_kv_cache", outTensorList);
@@ -557,12 +557,16 @@ void SetCrossAttentionParam(
 
   fusionAttentionParam.isOneRecEncoder = false;
   fusionAttentionParam.isOneRecCrossAttention = true;
+  fusionAttentionParam.enableCrossAttentionKernel =
+      param.enableCrossAttentionKernel && param.use_xattn;
   fusionAttentionParam.enableXattention = false;
   fusionAttentionParam.enableOneRecPrefillOnly =
       param.enableOneRecPrefillOnly && !param.use_xattn;
   ATB_SPEED_LOG_ERROR(
       "OneRecCrossAttention SetCrossAttentionParam: use_xattn="
       << param.use_xattn << ", isPrefill=" << param.isPrefill
+      << ", enableCrossAttentionKernel="
+      << fusionAttentionParam.enableCrossAttentionKernel
       << ", effectiveIsPrefill=" << fusionAttentionParam.isPrefill
       << ", enableXattention=" << fusionAttentionParam.enableXattention
       << ", enableOneRecPrefillOnly="
@@ -846,12 +850,13 @@ int64_t AddCrossAttention(atb::Node &crossAttentionNode,
       !param.enableSplitFuse && !param.isFA;
 
   if (crossAttnIsPrefill) {
-    // Prefill stage: compute cross K/V from encoder output. In prefill-only
-    // mode, the minimized ACLNN path only consumes the tensors that are
-    // actually used by the old T5 contract.
+    // Prefill stage: compute cross K/V from encoder output. OneRec xAttention
+    // writes them into the dedicated Cross KV block cache.
     crossAttnInTensorNames.push_back("in_encoder_output");
-    crossAttnInTensorNames.push_back("in_k_cache");
-    crossAttnInTensorNames.push_back("in_v_cache");
+    crossAttnInTensorNames.push_back(param.use_xattn ? "in_cross_k_cache"
+                                                     : "in_k_cache");
+    crossAttnInTensorNames.push_back(param.use_xattn ? "in_cross_v_cache"
+                                                     : "in_v_cache");
     if (!minimizeOneRecCrossAttnInputs) {
       crossAttnInTensorNames.push_back("in_cross_attn_slots");
       crossAttnInTensorNames.push_back("in_cross_attn_seq_len");
@@ -895,14 +900,22 @@ int64_t AddCrossAttention(atb::Node &crossAttentionNode,
   }
   if (crossAttnIsPrefill) {
     if (param.use_moe && param.enableIntraLayerAddNorm) {
-      crossAttentionNode.outTensorIds = atb_speed::common::GetTensorIdxList(
-          tensorMap,
-          {"intermediate_cross_attn_out", "intermediate_self_residual_out",
-           "in_cross_k_cache", "in_cross_v_cache"});
+      std::vector<std::string> outputNames = {
+          "intermediate_cross_attn_out", "intermediate_self_residual_out"};
+      if (!param.use_xattn) {
+        outputNames.push_back("in_cross_k_cache");
+        outputNames.push_back("in_cross_v_cache");
+      }
+      crossAttentionNode.outTensorIds =
+          atb_speed::common::GetTensorIdxList(tensorMap, outputNames);
     } else {
-      crossAttentionNode.outTensorIds = atb_speed::common::GetTensorIdxList(
-          tensorMap, {"intermediate_cross_attn_out", "in_cross_k_cache",
-                      "in_cross_v_cache"});
+      std::vector<std::string> outputNames = {"intermediate_cross_attn_out"};
+      if (!param.use_xattn) {
+        outputNames.push_back("in_cross_k_cache");
+        outputNames.push_back("in_cross_v_cache");
+      }
+      crossAttentionNode.outTensorIds =
+          atb_speed::common::GetTensorIdxList(tensorMap, outputNames);
     }
   } else {
     if (param.use_moe && param.enableIntraLayerAddNorm) {
