@@ -81,6 +81,7 @@ struct BlockLayerParam {
   float rmsNormEps = 0;
   int layerId = 0;
   int bs = 0;
+  int64_t blockSize = 128;
 
   std::vector<int> seqLen;
   std::vector<int> tokenOffset;
@@ -104,6 +105,7 @@ struct BlockLayerParam {
   bool emptyCrossAttn = true;
   bool use_moe = false;
   bool use_xattn = false;
+  bool enableCrossAttentionKernel = false;
 
   // OneRec MoE configuration (only valid when use_moe is true)
   std::unique_ptr<OneRecMoEConfig> moe_config = nullptr;

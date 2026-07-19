@@ -232,6 +232,7 @@ template <typename NormParamType> struct FusionAttentionParam {
   bool isOneRecEncoder = false;
   bool isOneRecDecoder = false;
   bool isOneRecCrossAttention = false;
+  bool enableCrossAttentionKernel = false;
   bool enableOneRecPrefillOnly = false;
 };
 

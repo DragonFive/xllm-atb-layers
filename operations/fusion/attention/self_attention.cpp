@@ -16,6 +16,7 @@
 #include "operations/fusion/attention/self_attention.h"
 #include "atb_speed/utils/check_util.h"
 #include "operations/aclnn/ops/attn_operation.h"
+#include "operations/aclnn/ops/cross_attention_operation.h"
 #include "operations/aclnn/ops/dequant_rope_quant_kvcache_operation.h"
 #include "operations/aclnn/ops/flash_attention_score_operation.h"
 #include "operations/aclnn/ops/reshape_decode_kv_cache_operation.h"
@@ -29,7 +30,7 @@ namespace atb_speed {
 namespace common {
 
 template <typename NormParamType>
-int64_t ConstructOneRecCrossFusedInferAttentionNode(
+int64_t ConstructOneRecCrossAttentionNode(
     atb::Node &selfAttentionNode,
     const FusionAttentionParam<NormParamType> &param,
     std::map<std::string, uint32_t> &tensorMap);
@@ -45,7 +46,8 @@ int64_t AddSelfAttention(atb::GraphParam &opGraph,
   }
   ATB_SPEED_LOG_DEBUG("layer map tensor:\n" << ss.str());
   const bool shouldSkipOneRecCrossPrefillCacheUpdate =
-      param.isOneRecCrossAttention && param.isPrefill;
+      param.isOneRecCrossAttention && param.isPrefill &&
+      !param.enableCrossAttentionKernel;
   if (!param.enableRopeQuantKvcache && param.needUpdateKVCache &&
       !shouldSkipOneRecCrossPrefillCacheUpdate) {
     if (!param.isFA) { // Paged Attention path
@@ -103,7 +105,7 @@ int64_t AddSelfAttention(atb::GraphParam &opGraph,
       }
     } else if (param.attnBackend == atb_speed::common::OpBackend::ACLNN &&
                param.isOneRecCrossAttention) {
-      CHECK_OPERATION_STATUS_RETURN(ConstructOneRecCrossFusedInferAttentionNode(
+      CHECK_OPERATION_STATUS_RETURN(ConstructOneRecCrossAttentionNode(
           selfAttentionNode, param, tensorMap));
     } else if (param.attnBackend ==
                atb_speed::common::OpBackend::ACLNN) { // ACLNN PA Decode
@@ -306,8 +308,12 @@ int64_t AddPaKVCacheOperation(atb::GraphParam &opGraph,
                       TYPE_QUANT_QKV_ONLINE
           ? GetTensorIdx(tensorMap, "intermediate_v_int8")
           : GetTensorIdx(tensorMap, "intermediate_v"),
-      GetTensorIdx(tensorMap, "in_k_cache"),
-      GetTensorIdx(tensorMap, "in_v_cache"),
+      param.isOneRecCrossAttention
+          ? GetTensorIdx(tensorMap, "in_cross_k_cache")
+          : GetTensorIdx(tensorMap, "in_k_cache"),
+      param.isOneRecCrossAttention
+          ? GetTensorIdx(tensorMap, "in_cross_v_cache")
+          : GetTensorIdx(tensorMap, "in_v_cache"),
       param.isOneRecCrossAttention
           ? GetTensorIdx(tensorMap, "in_cross_attn_slots")
           : GetTensorIdx(tensorMap, "in_slots_in_pa_or_logn_in_fa"),
@@ -348,8 +354,12 @@ int64_t AddPaKVCacheOperation(atb::GraphParam &opGraph,
     reshapeAndCacheNode.inTensorReshapeFuncs.at(1) = reshapeKVFunc;
   }
   reshapeAndCacheNode.outTensorIds = {
-      GetTensorIdx(tensorMap, "in_k_cache"),
-      GetTensorIdx(tensorMap, "in_v_cache"),
+      param.isOneRecCrossAttention
+          ? GetTensorIdx(tensorMap, "in_cross_k_cache")
+          : GetTensorIdx(tensorMap, "in_k_cache"),
+      param.isOneRecCrossAttention
+          ? GetTensorIdx(tensorMap, "in_cross_v_cache")
+          : GetTensorIdx(tensorMap, "in_v_cache"),
   };
   opGraph.nodes.push_back(reshapeAndCacheNode);
   return atb::NO_ERROR;
@@ -832,39 +842,57 @@ ValidatePerRankKvLayout(const FusionAttentionParam<NormParamType> &param,
 } // namespace
 
 template <typename NormParamType>
-int64_t ConstructOneRecCrossFusedInferAttentionNode(
+int64_t ConstructOneRecCrossAttentionNode(
     atb::Node &selfAttentionNode,
     const FusionAttentionParam<NormParamType> &param,
     std::map<std::string, uint32_t> &tensorMap) {
+  constexpr const char *caller = "ConstructOneRecCrossAttentionNode";
   CHECK_OPERATION_STATUS_RETURN(ValidatePerRankKvLayout(
-      param, "ConstructOneRecCrossFusedInferAttentionNode"));
+      param, caller));
   CHECK_OPERATION_STATUS_RETURN(ValidateRequiredTensor(
-      tensorMap, "intermediate_q",
-      "ConstructOneRecCrossFusedInferAttentionNode"));
+      tensorMap, "intermediate_q", caller));
   CHECK_OPERATION_STATUS_RETURN(ValidateRequiredTensor(
-      tensorMap, "in_cross_k_cache",
-      "ConstructOneRecCrossFusedInferAttentionNode"));
+      tensorMap, "in_cross_k_cache", caller));
   CHECK_OPERATION_STATUS_RETURN(ValidateRequiredTensor(
-      tensorMap, "in_cross_v_cache",
-      "ConstructOneRecCrossFusedInferAttentionNode"));
-  CHECK_OPERATION_STATUS_RETURN(ValidateRequiredTensor(
-      tensorMap, "cross_kv_len",
-      "ConstructOneRecCrossFusedInferAttentionNode"));
-  ATB_SPEED_LOG_ERROR(
-      "OneRecCrossAttention ConstructOneRecCrossFusedInferAttentionNode: "
+      tensorMap, "in_cross_v_cache", caller));
+  if (param.enableCrossAttentionKernel) {
+    CHECK_OPERATION_STATUS_RETURN(ValidateRequiredTensor(
+        tensorMap, "in_cross_attn_seq_len", caller));
+    CHECK_OPERATION_STATUS_RETURN(ValidateRequiredTensor(
+        tensorMap, "in_cross_attn_block_tables", caller));
+  }
+  ATB_SPEED_LOG_DEBUG(
+      "OneRecCrossAttention ConstructOneRecCrossAttentionNode: "
       << "isOneRecCrossAttention=" << param.isOneRecCrossAttention
       << ", isPrefill=" << param.isPrefill
       << ", enableXattention=" << param.enableXattention
+      << ", enableCrossAttentionKernel="
+      << param.enableCrossAttentionKernel
       << ", consume_k=in_cross_k_cache, consume_v=in_cross_v_cache");
-  selfAttentionNode.inTensorIds = {
-      GetTensorIdx(tensorMap, "intermediate_q"),
-      GetTensorIdx(tensorMap, "in_cross_k_cache"),
-      GetTensorIdx(tensorMap, "in_cross_v_cache"),
-      GetTensorIdx(tensorMap, "cross_kv_len"),
-  };
-  selfAttentionNode.operation =
-      new atb_speed::common::FusedInferAttentionV2Operation(
-          "FusedInferAttentionNode", param.aclnnFusedInferAttnParam);
+  if (param.enableCrossAttentionKernel) {
+    selfAttentionNode.inTensorIds = {
+        GetTensorIdx(tensorMap, "intermediate_q"),
+        GetTensorIdx(tensorMap, "in_cross_k_cache"),
+        GetTensorIdx(tensorMap, "in_cross_v_cache"),
+        GetTensorIdx(tensorMap, "in_cross_attn_block_tables"),
+        GetTensorIdx(tensorMap, "in_cross_attn_seq_len"),
+    };
+    atb_speed::common::AclNNCrossAttentionParam crossAttentionParam;
+    crossAttentionParam.scaleValue =
+        param.aclnnFusedInferAttnParam.scaleValue;
+    selfAttentionNode.operation =
+        new atb_speed::common::CrossAttentionOperation(
+            "CrossAttentionNode", crossAttentionParam);
+  } else {
+    selfAttentionNode.inTensorIds = {
+        GetTensorIdx(tensorMap, "intermediate_q"),
+        GetTensorIdx(tensorMap, "in_cross_k_cache"),
+        GetTensorIdx(tensorMap, "in_cross_v_cache"),
+    };
+    selfAttentionNode.operation =
+        new atb_speed::common::FusedInferAttentionV2Operation(
+            "FusedInferAttentionNode", param.aclnnFusedInferAttnParam);
+  }
   selfAttentionNode.inTensorReshapeFuncs.resize(
       selfAttentionNode.inTensorIds.size());
 
@@ -889,8 +917,10 @@ int64_t ConstructOneRecCrossFusedInferAttentionNode(
     newShape.dims[dim++] = param.headDim;
     newShape.dimNum = dim;
   };
-  selfAttentionNode.inTensorReshapeFuncs.at(1) = reshapeKVFunc;
-  selfAttentionNode.inTensorReshapeFuncs.at(2) = reshapeKVFunc;
+  if (!param.enableCrossAttentionKernel) {
+    selfAttentionNode.inTensorReshapeFuncs.at(1) = reshapeKVFunc;
+    selfAttentionNode.inTensorReshapeFuncs.at(2) = reshapeKVFunc;
+  }
   selfAttentionNode.inTensorReshapeFuncs.at(0) = [=](const atb::Dims &oldShape,
                                                      atb::Dims &newShape) {
     size_t dim = 0;
