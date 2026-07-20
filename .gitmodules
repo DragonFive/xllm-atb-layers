@@ -3,4 +3,4 @@
 	url = git@coding.jd.com:9n_thirdparty/spdlog.git
 [submodule "third_party/xllm_ops"]
 	path = third_party/xllm_ops
-	url = https://gitcode.com/xLLM-AI/xllm_ops.git
+	url = git@github.com:DragonFive/xllm-ops.git
