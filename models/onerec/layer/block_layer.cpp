@@ -41,6 +41,11 @@ bool EffectiveCrossAttentionIsPrefill(const BlockLayerParam &param) {
   return param.isPrefill && !(use_prefill_only && !param.emptyCrossAttn);
 }
 
+bool UseCrossQAddNorm(const BlockLayerParam &param) {
+  return param.isDecoder && param.enableIntraLayerAddNorm &&
+         !param.supportLora;
+}
+
 bool DebugStopAfterCrossForLayer0(const BlockLayerParam &param) {
   const char *flag = std::getenv("XLLM_DEBUG_ONEREC_LAYER0_STOP_AFTER_CROSS");
   if (flag == nullptr || std::string(flag) != "1") {
@@ -547,6 +552,7 @@ void SetCrossAttentionParam(
   fusionAttentionParam.aclnnFusedInferAttnParam.numKeyValueHeads =
       param.numKeyValueHeadsPerRank;
   fusionAttentionParam.aclnnFusedInferAttnParam.inputLayout = "BSND";
+  fusionAttentionParam.aclnnFusedInferAttnParam.useActualSeqLengths = false;
   const double cross_attention_scale =
       param.useAttentionScaling
           ? static_cast<double>(param.hiddenSizePerAttentionHead)
@@ -572,11 +578,9 @@ void SetCrossAttentionParam(
       << fusionAttentionParam.enableOneRecPrefillOnly
       << ", needUpdateKVCache(pre)="
       << fusionAttentionParam.needUpdateKVCache);
-  // Plan D (intra-layer): in the MoE decoder path, fuse the self-attn residual
-  // add with the next cross-attn Q RMSNorm inside CrossAttention (expose
-  // `out_add` to replace the standalone Add op).
-  fusionAttentionParam.enableAddNorm =
-      param.enableIntraLayerAddNorm && param.use_moe;
+  // Fuse the self-attn residual add with the next cross-attn Q RMSNorm inside
+  // CrossAttention and expose `out_add` to replace the standalone Add op.
+  fusionAttentionParam.enableAddNorm = UseCrossQAddNorm(param);
   *fusionAttentionParam.bs = param.bs;
 
   if (param.hiddenSizePerAttentionHead == 0) {
@@ -804,7 +808,7 @@ int64_t AddCrossAttention(atb::Node &crossAttentionNode,
   // Cross-attention inputs: self-attention output as query, weight tensors,
   // and stage-specific tensors.
   std::vector<std::string> crossAttnInTensorNames = {
-      (param.use_moe && param.enableIntraLayerAddNorm)
+      UseCrossQAddNorm(param)
           ? "intermediate_self_attn_out"
           : "intermediate_self_residual_out",
       "in_cross_attn_norm_weight",
@@ -876,9 +880,9 @@ int64_t AddCrossAttention(atb::Node &crossAttentionNode,
     crossAttnInTensorNames.push_back("cross_kv_len");
   }
 
-  // Plan D (intra-layer): CrossAttention needs the residual tensor
-  // (`in_residual_add`) for internal Add+RMSNorm.
-  if (param.use_moe && param.enableIntraLayerAddNorm) {
+  // CrossAttention needs the residual tensor (`in_residual_add`) for internal
+  // Add+RMSNorm when the self residual is fused into Q RMSNorm.
+  if (UseCrossQAddNorm(param)) {
     crossAttnInTensorNames.push_back("in_input");
   }
 
@@ -917,7 +921,7 @@ int64_t AddCrossAttention(atb::Node &crossAttentionNode,
           atb_speed::common::GetTensorIdxList(tensorMap, outputNames);
     }
   } else {
-    if (param.use_moe && param.enableIntraLayerAddNorm) {
+    if (UseCrossQAddNorm(param)) {
       crossAttentionNode.outTensorIds = atb_speed::common::GetTensorIdxList(
           tensorMap,
           {"intermediate_cross_attn_out", "intermediate_self_residual_out"});
@@ -1345,10 +1349,11 @@ atb::Status BlockLayer(const BlockLayerParam &param,
   // Self-attention residual connection
   atb::infer::ElewiseParam addParam;
   addParam.elewiseType = atb::infer::ElewiseParam::ElewiseType::ELEWISE_ADD;
-  // Plan D (intra-layer): when enabled, the self-attn residual add is
-  // produced by CrossAttention's `out_add`, so we don't insert a standalone
-  // Add node here.
-  if (!(param.use_moe && param.enableIntraLayerAddNorm)) {
+  // When enabled, the self-attn residual add is produced by CrossAttention's
+  // `out_add`, so we don't insert a standalone Add node here.
+  const bool fuseSelfResidualIntoCross =
+      UseCrossQAddNorm(param) && !DebugStopAfterSelfForLayer0(param);
+  if (!fuseSelfResidualIntoCross) {
     CHECK_OPERATION_STATUS_RETURN(
         atb::CreateOperation(addParam, &selfResidualAddNode.operation));
     // OneRec uses "in_input" instead of "in_hidden_states"

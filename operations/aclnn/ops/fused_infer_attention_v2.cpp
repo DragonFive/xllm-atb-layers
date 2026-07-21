@@ -42,6 +42,9 @@ FusedInferAttentionV2Operation::~FusedInferAttentionV2Operation() {
 }
 
 uint32_t FusedInferAttentionV2Operation::GetInputNum() const {
+  if (!param_.useActualSeqLengths) {
+    return NUM3;
+  }
   auto input_num = NUM4;
   if (param_.needMask) {
     input_num += NUM1;  //mask
@@ -91,6 +94,8 @@ int FusedInferAttentionV2Operation::CreateAclNNInTensorVariantPack(
     const atb::VariantPack& variantPack) {
   AclNNVariantPack& aclnnVariantPack = this->aclnnOpCache_->aclnnVariantPack;
   uint32_t inputNum = GetInputNum();
+  actualSeqLengths_ = nullptr;
+  actualSeqLengthsKv_ = nullptr;
   aclnnVariantPack.aclInTensors.resize(inputNum);
   for (size_t i = 0; i < inputNum; i++) {
     std::shared_ptr<AclNNTensor> aclnnTensor = std::make_shared<AclNNTensor>();
@@ -205,9 +210,13 @@ int FusedInferAttentionV2Operation::SetAclNNWorkspaceExecutor() {
   AclNNVariantPack& aclnnVariantPack = this->aclnnOpCache_->aclnnVariantPack;
   aclTensor* query = aclnnVariantPack.aclInTensors.at(0)->tensor;
   aclTensor* attenMask =
-      param_.needMask ? aclnnVariantPack.aclInTensors.at(4)->tensor : nullptr;
+      (param_.useActualSeqLengths && param_.needMask)
+          ? aclnnVariantPack.aclInTensors.at(4)->tensor
+          : nullptr;
   aclTensor* blocktable = 
-      param_.enablePa ? aclnnVariantPack.aclInTensors.at(6)->tensor : nullptr;
+      (param_.useActualSeqLengths && param_.enablePa)
+          ? aclnnVariantPack.aclInTensors.at(6)->tensor
+          : nullptr;
   aclTensor* attnOut = aclnnVariantPack.aclOutTensors.at(0)->tensor;
   int ret = aclnnFusedInferAttentionScoreV2GetWorkspaceSize(
         query,        // 0: query index

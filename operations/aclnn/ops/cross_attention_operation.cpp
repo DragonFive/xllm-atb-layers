@@ -56,13 +56,9 @@ atb::Status CrossAttentionOperation::CreateAclNNInTensorVariantPack(
                                 << variantPack.inTensors.size());
     return atb::ERROR_INVALID_PARAM;
   }
-  for (size_t i = 0; i < variantPack.inTensors.size(); ++i) {
-    if (variantPack.inTensors.at(i).deviceData == nullptr) {
-      ATB_SPEED_LOG_ERROR(opName_ << " requires device tensor for input "
-                                  << kInputNames[i] << " (index " << i << ")");
-      return atb::ERROR_INVALID_PARAM;
-    }
-  }
+  // ATB may create the ACLNN executor before intermediate graph tensors have
+  // a runtime device address. The base implementation creates metadata-only
+  // ACL tensors first and refreshes data pointers before Execute.
   return AclNNOperation::CreateAclNNInTensorVariantPack(variantPack);
 }
 
