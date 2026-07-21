@@ -70,13 +70,13 @@ set(XLLM_ATB_NPU_INCLUDE_DIRS)
 if(NOT "${XLLM_ATB_NPU_HOME_PATH}" STREQUAL "")
   list(APPEND XLLM_ATB_NPU_INCLUDE_DIRS "${XLLM_ATB_NPU_HOME_PATH}/include")
 endif()
-if(EXISTS "${XLLM_ATB_OPP_PATH}/vendors/xllm/op_api/include")
-  list(APPEND XLLM_ATB_NPU_INCLUDE_DIRS "${XLLM_ATB_OPP_PATH}/vendors/xllm/op_api/include")
-endif()
+
 if(EXISTS "${XLLM_ATB_OPP_PATH}/vendors/custom_xllm_math/op_api/include/aclnnop")
   list(APPEND XLLM_ATB_NPU_INCLUDE_DIRS "${XLLM_ATB_OPP_PATH}/vendors/custom_xllm_math/op_api/include/aclnnop")
 endif()
-
+if(EXISTS "${XLLM_ATB_OPP_PATH}/include/aclnnop")
+  list(APPEND XLLM_ATB_NPU_INCLUDE_DIRS "${XLLM_ATB_OPP_PATH}/include/aclnnop")
+endif()
 target_include_directories(xllm_atb_layers PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/spdlog/include
   $ENV{PYTHON_INCLUDE_PATH}
