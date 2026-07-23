@@ -60,6 +60,10 @@ std::map<std::string, std::vector<std::string>> GetQKVIntermediateTensorCandidat
         {"qkv_pack", {"intermediate_qkv"}},
         {"qk_norm", {"intermediate_q", "intermediate_k", "intermediate_q_rstd_out", "intermediate_k_rstd_out"}},
         {"add_norm", {"out_add"}},
+        // MLA: compressed KV latent and its normalized form, plus the packed
+        // KV produced by kv_b_proj before splitting into K/V.
+        {"mla", {"intermediate_mla_compressed_kv", "intermediate_mla_compressed_kv_norm",
+                 "intermediate_mla_kv"}},
     };
     return qkvIntermediateTensorCandidates;
 }
@@ -103,6 +107,10 @@ std::map<std::string, uint32_t> ConstructQKVTensorMap(
             AddTensorToList(qkvIntermediateTensorCandidates, "qk_norm", intermediateTensorList);
             AddTensorToList(qkvInTensorCandidates, "qk_norm", inTensorList);
         }
+    }
+    // MLA needs its own compressed-KV intermediates (no QKV pack).
+    if (param.useMla) {
+        AddTensorToList(qkvIntermediateTensorCandidates, "mla", intermediateTensorList);
     }
 
     // translatedLoratranslatedTensor
@@ -463,6 +471,127 @@ void QKVLinearSplitInferShapeFunc(const FusionAttentionParam<NormParamType> &par
     }
 }
 
+// Builds the OneRec MLA projection subgraph inside QKVLinearSplit. Produces
+// out_q / out_k / out_v with the same layout as the packed QKV path so every
+// downstream attention node (self XAttention, cross FIA, KV cache) is reused
+// unchanged. OneRec MLA has no RoPE.
+//
+// Flow:
+//   q_proj    : NormLinear(in_qkv_input, in_qkv_norm_weight, in_qkv_weight_0)
+//                 -> out_q                              [ntokens, headNum*headDim]
+//   kv_a_proj : NormLinear(in_qkv_input, in_qkv_norm_weight, in_qkv_weight_1)
+//                 -> intermediate_mla_compressed_kv     [ntokens, kvLoraRank]
+//   kv_a_norm : RmsNorm(compressed_kv, in_qkv_bias_1)   (bias slot holds the
+//                 kv_a_layernorm weight; OneRec norms have no bias)
+//                 -> intermediate_mla_compressed_kv_norm
+//   kv_b_proj : Linear(compressed_kv_norm, in_qkv_weight_2)
+//                 -> intermediate_mla_kv                [ntokens, headNum*(nope+v)]
+//   split     : reshape to [ntokens, headNum, nope+v] then split last dim
+//                 -> out_k [.., headNum, nope], out_v [.., headNum, v]
+template <typename NormParamType>
+atb::Status AddMlaProjection(const FusionAttentionParam<NormParamType> &param,
+    atb::GraphParam &opGraph, std::map<std::string, uint32_t> &tensorMap)
+{
+    const int headNum = param.selfAttentionParam.headNum;
+    const int nopeDim = param.qkNopeHeadDim > 0 ? param.qkNopeHeadDim : param.headDim;
+    const int vDim = param.vHeadDim > 0 ? param.vHeadDim : param.headDim;
+
+    // q_proj: shared input RMSNorm fused with the Q linear.
+    {
+        atb::Node qNode;
+        atb_speed::common::NormLinearParam<NormParamType> qParam;
+        qParam.fusionLinearParam.isBF16 = param.isBF16;
+        qParam.fusionLinearParam.hasBias = false;
+        qParam.fusionLinearParam.transposeType = param.layerLinearTransposeType[Q_LINEAR_INDEX];
+        qParam.fusionLinearParam.matmulBackend = param.matmulBackend;
+        qParam.fusionLinearParam.isPrefill = param.isPrefill;
+        qParam.normParamType = param.normParamType;
+        qParam.normQuantParamType = param.normQuantParamType;
+        CHECK_OPERATION_STATUS_RETURN(NormLinear<NormParamType>(qParam, &qNode.operation));
+        qNode.inTensorIds = GetTensorIdxList(tensorMap, {
+            "in_qkv_input", "in_qkv_norm_weight", "in_qkv_norm_bias", "in_qkv_norm_new_weight",
+            "in_qkv_norm_new_bias",
+            "in_qkv_weight_0", "in_qkv_scale_0", "in_qkv_offset_0", "in_qkv_descale_0", "in_qkv_bias_0",
+            "in_qkv_compress_idx_0"});
+        qNode.outTensorIds = GetTensorIdxList(tensorMap, {"out_q"});
+        opGraph.nodes.push_back(qNode);
+    }
+
+    // kv_a_proj: shared input RMSNorm fused with the compressed-KV down linear.
+    {
+        atb::Node kvaNode;
+        atb_speed::common::NormLinearParam<NormParamType> kvaParam;
+        kvaParam.fusionLinearParam.isBF16 = param.isBF16;
+        kvaParam.fusionLinearParam.hasBias = false;
+        kvaParam.fusionLinearParam.transposeType = param.layerLinearTransposeType[K_LINEAR_INDEX];
+        kvaParam.fusionLinearParam.matmulBackend = param.matmulBackend;
+        kvaParam.fusionLinearParam.isPrefill = param.isPrefill;
+        kvaParam.normParamType = param.normParamType;
+        kvaParam.normQuantParamType = param.normQuantParamType;
+        CHECK_OPERATION_STATUS_RETURN(NormLinear<NormParamType>(kvaParam, &kvaNode.operation));
+        kvaNode.inTensorIds = GetTensorIdxList(tensorMap, {
+            "in_qkv_input", "in_qkv_norm_weight", "in_qkv_norm_bias", "in_qkv_norm_new_weight",
+            "in_qkv_norm_new_bias",
+            "in_qkv_weight_1", "in_qkv_scale_1", "in_qkv_offset_1", "in_qkv_descale_1", "in_qkv_bias_1",
+            "in_qkv_compress_idx_1"});
+        kvaNode.outTensorIds = GetTensorIdxList(tensorMap, {"intermediate_mla_compressed_kv"});
+        opGraph.nodes.push_back(kvaNode);
+    }
+
+    // kv_a_layernorm: plain RMSNorm on the compressed latent. The layernorm
+    // weight is delivered in the "in_qkv_bias_1" slot (OneRec norms have no
+    // bias, so the K bias slot is free).
+    {
+        atb::Node normNode;
+        atb::infer::RmsNormParam normParam;
+        normParam.layerType = atb::infer::RmsNormParam::RmsNormType::RMS_NORM_NORM;
+        normParam.normParam.epsilon = param.normParamType.normParam.epsilon;
+        CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(normParam, &normNode.operation));
+        normNode.inTensorIds = GetTensorIdxList(tensorMap,
+            {"intermediate_mla_compressed_kv", "in_qkv_bias_1"});
+        normNode.outTensorIds = GetTensorIdxList(tensorMap,
+            {"intermediate_mla_compressed_kv_norm"});
+        opGraph.nodes.push_back(normNode);
+    }
+
+    // kv_b_proj: plain linear from the normalized latent to packed per-head KV.
+    {
+        atb::Node kvbNode;
+        atb::infer::LinearParam linearParam;
+        linearParam.transposeB = (param.layerLinearTransposeType[V_LINEAR_INDEX] != 0);
+        linearParam.hasBias = false;
+        CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(linearParam, &kvbNode.operation));
+        kvbNode.inTensorIds = GetTensorIdxList(tensorMap,
+            {"intermediate_mla_compressed_kv_norm", "in_qkv_weight_2"});
+        kvbNode.outTensorIds = GetTensorIdxList(tensorMap, {"intermediate_mla_kv"});
+        opGraph.nodes.push_back(kvbNode);
+    }
+
+    // split: reshape packed KV to [ntokens, headNum, nope+v] and split the last
+    // dim into K (nope) and V (v).
+    {
+        atb::Node splitNode;
+        atb::infer::SplitParam splitParam;
+        splitParam.splitDim = 2;  // split the per-head (nope+v) dimension
+        splitParam.splitNum = 2;
+        splitParam.splitSizes = {nopeDim, vDim};
+        CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(splitParam, &splitNode.operation));
+        splitNode.inTensorIds = GetTensorIdxList(tensorMap, {"intermediate_mla_kv"});
+        splitNode.outTensorIds = GetTensorIdxList(tensorMap, {"out_k", "out_v"});
+        splitNode.inTensorReshapeFuncs.resize(splitNode.inTensorIds.size());
+        splitNode.inTensorReshapeFuncs[0] = [=](const atb::Dims &oldShape, atb::Dims &newShape) {
+            // [ntokens, headNum*(nope+v)] -> [ntokens, headNum, nope+v]
+            newShape.dimNum = 3;
+            newShape.dims[0] = oldShape.dims[0];
+            newShape.dims[1] = headNum;
+            newShape.dims[2] = nopeDim + vDim;
+        };
+        opGraph.nodes.push_back(splitNode);
+    }
+
+    return atb::NO_ERROR;
+}
+
 template <typename NormParamType>
 atb::Status QKVLinearSplit(const FusionAttentionParam<NormParamType> &param, atb::Operation **operation)
 {
@@ -471,7 +600,6 @@ atb::Status QKVLinearSplit(const FusionAttentionParam<NormParamType> &param, atb
         ATB_SPEED_LOG_ERROR("The size of param.layerLinearDescs is wrong, please check");
         return atb::ERROR_INVALID_PARAM;
     }
-
     std::vector<int> qkvLinearIndex = {Q_LINEAR_INDEX, K_LINEAR_INDEX, V_LINEAR_INDEX};
     bool isPack = CheckPack(param.packQuantType, param.layerLinearDescs, qkvLinearIndex);
     bool isAntiOutlier = CheckAntiOutlier(param.packQuantType);
@@ -489,6 +617,19 @@ atb::Status QKVLinearSplit(const FusionAttentionParam<NormParamType> &param, atb
     CHECK_PARAM_GT(param.selfAttentionParam.headNum, 0);
     CHECK_PARAM_GT(param.headDim, 0);
     CHECK_PARAM_LT(param.headDim, 576);  // 576: headDimtranslated
+
+    if (param.useMla) {
+        // MLA projection: q_proj / kv_a_proj / kv_a_layernorm / kv_b_proj,
+        // producing out_q / out_k / out_v with the same contract as the packed
+        // path so all downstream attention nodes are unchanged.
+        CHECK_OPERATION_STATUS_RETURN(AddMlaProjection(param, opGraph, tensorMap));
+        uint32_t inQKVInputIdx = GetTensorIdx(tensorMap, "in_qkv_input");
+        uint32_t inResidualAddInputIdx = GetTensorIdx(tensorMap, "in_residual_add");
+        uint32_t inFakeAgShapeIdx = GetTensorIdx(tensorMap, "fake_ag_shape");
+        QKVLinearSplitInferShapeFunc(param, opGraph, inQKVInputIdx, inResidualAddInputIdx, inFakeAgShapeIdx);
+        CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(opGraph, operation));
+        return atb::NO_ERROR;
+    }
 
     CHECK_OPERATION_STATUS_RETURN(AddQNormLinearNode(param, opGraph, tensorMap, isAntiOutlier, isPack));
 

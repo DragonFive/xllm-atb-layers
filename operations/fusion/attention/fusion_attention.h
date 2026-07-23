@@ -234,6 +234,13 @@ template <typename NormParamType> struct FusionAttentionParam {
   bool isOneRecCrossAttention = false;
   bool enableCrossAttentionKernel = false;
   bool enableOneRecPrefillOnly = false;
+  // OneRec MLA (Multi-head Latent Attention). When true, QKVLinearSplit builds
+  // the MLA projection (q_proj / kv_a_proj / kv_a_layernorm / kv_b_proj) instead
+  // of the packed QKV split. OneRec MLA has no RoPE, so qkNopeHeadDim == headDim.
+  bool useMla = false;
+  int kvLoraRank = 0;
+  int qkNopeHeadDim = 0;
+  int vHeadDim = 0;
 };
 
 template <typename NormParamType>

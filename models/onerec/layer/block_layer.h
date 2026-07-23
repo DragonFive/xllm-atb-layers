@@ -107,6 +107,15 @@ struct BlockLayerParam {
   bool use_xattn = false;
   bool enableCrossAttentionKernel = false;
 
+  // OneRec MLA (Multi-head Latent Attention) parameters. When use_mla is true,
+  // the attention projection uses q_proj / kv_a_proj / kv_a_layernorm /
+  // kv_b_proj instead of packed QKV. OneRec MLA has no RoPE, so
+  // qkNopeHeadDim == vHeadDim == headDim.
+  bool use_mla = false;
+  int kvLoraRank = 0;
+  int qkNopeHeadDim = 0;
+  int vHeadDim = 0;
+
   // OneRec MoE configuration (only valid when use_moe is true)
   std::unique_ptr<OneRecMoEConfig> moe_config = nullptr;
 };

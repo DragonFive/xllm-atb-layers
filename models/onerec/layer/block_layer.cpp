@@ -384,6 +384,12 @@ void SetSelfAttentionParamPart(
   fusionAttentionParam.splitWithStride = false;
   fusionAttentionParam.enableXattention = param.isDecoder && param.use_xattn;
 
+  // OneRec MLA projection config (shared by self- and cross-attention).
+  fusionAttentionParam.useMla = param.use_mla;
+  fusionAttentionParam.kvLoraRank = param.kvLoraRank;
+  fusionAttentionParam.qkNopeHeadDim = param.qkNopeHeadDim;
+  fusionAttentionParam.vHeadDim = param.vHeadDim;
+
   // OneRec uses RMSNorm
   atb::infer::RmsNormParam attenRmsNormParam;
   attenRmsNormParam.layerType =
