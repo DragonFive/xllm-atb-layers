@@ -98,6 +98,8 @@ struct BlockLayerParam {
   // Four elements: quantization types for MoE router, gate, up, down linear
   // respectively
   std::vector<int> moeLinearQuantType = {};
+  int moePackQuantType = atb_speed::common::PackQuantType::ALL_FP;
+  bool enableGMMSwigluQuant = false;
 
   // OneRec specific parameters
   bool isOneRecEncoder = false;

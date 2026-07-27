@@ -966,16 +966,16 @@ void SetMoeParam(atb_speed::common::SparseMoeParam &sparseMoeParam,
   // Data type and optimization settings
   sparseMoeParam.isBF16 = moe_config.use_bf16;
   sparseMoeParam.supportSwiGLU = true;
-  sparseMoeParam.transpose = true;
-  sparseMoeParam.gateUpTransposeB = true;
-  sparseMoeParam.downTransposeB = true;
+  sparseMoeParam.transpose = !param.enableGMMSwigluQuant;
+  sparseMoeParam.gateUpTransposeB = !param.enableGMMSwigluQuant;
+  sparseMoeParam.downTransposeB = !param.enableGMMSwigluQuant;
 
   // Optimization flags
   sparseMoeParam.enableFusedRouting = true;
   sparseMoeParam.enableFusedTopk = false;
   sparseMoeParam.enableCVOverlap = false;
   sparseMoeParam.enableMoeParallel = false;
-  sparseMoeParam.enableGMMSwigluQuant = false;
+  sparseMoeParam.enableGMMSwigluQuant = param.enableGMMSwigluQuant;
   sparseMoeParam.enableLoadBalance = false;
 
   // Communication settings
@@ -987,8 +987,8 @@ void SetMoeParam(atb_speed::common::SparseMoeParam &sparseMoeParam,
   // Bias and quantization settings
   sparseMoeParam.hasBias = false;
   sparseMoeParam.rounterHasBias = false;
-  sparseMoeParam.packQuantType = atb_speed::common::PackQuantType::ALL_FP;
-  sparseMoeParam.enableInitQuant = false;
+  sparseMoeParam.packQuantType = param.moePackQuantType;
+  sparseMoeParam.enableInitQuant = param.enableGMMSwigluQuant;
   sparseMoeParam.enableSwigluQuant = false;
   sparseMoeParam.enableMoeDistribute = false;
   sparseMoeParam.routedScalingFactor = moe_config.moe_route_scale;
@@ -1132,23 +1132,24 @@ int64_t AddSharedExpert(atb::Node &sharedExpertNode,
   sharedExpertParam.transposeDown =
       param.linearTransposeType[MLP_DOWN_LINEAR_INDEX];
   sharedExpertParam.hasSharedExpertGate = param.moe_config->hasSharedExpertGate;
-  // SharedExpertParam does not share the same slot semantics as OneRec's
-  // moeLinearQuantType. OneRec stores [router, gate, up, down], while the
-  // shared expert sub-graph expects [gate_up, unused, down, shared_gate].
-  // Remap the vector explicitly.
+  const bool enableSharedExpertW8A8 =
+      param.enableSwiGLUQuantForSharedExperts;
   sharedExpertParam.mlpLinearQuantType = {
-      param.moeLinearQuantType.at(1), param.moeLinearQuantType.at(2),
-      param.moeLinearQuantType.at(3),
-      param.moe_config->hasSharedExpertGate
-          ? param.moeLinearQuantType.at(0)
-          : atb_speed::common::LinearType::FP};
+      enableSharedExpertW8A8 ? atb_speed::common::LinearType::INT
+                            : atb_speed::common::LinearType::FP,
+      atb_speed::common::LinearType::INVALID,
+      enableSharedExpertW8A8 ? atb_speed::common::LinearType::INT
+                            : atb_speed::common::LinearType::FP,
+      atb_speed::common::LinearType::FP};
   sharedExpertParam.mlpLinearTransposeType = {
       param.linearTransposeType.at(MLP_GATEUP_LINEAR_INDEX),
       param.linearTransposeType.at(MLP_GATEUP_LINEAR_INDEX),
       param.linearTransposeType.at(MLP_DOWN_LINEAR_INDEX),
       param.linearTransposeType.at(MLP_GATEUP_LINEAR_INDEX)};
   sharedExpertParam.quantGroupSize = param.quantGroupSize;
-  sharedExpertParam.packQuantType = param.packQuantType.at(1);
+  sharedExpertParam.packQuantType = enableSharedExpertW8A8
+                                        ? param.moePackQuantType
+                                        : param.packQuantType.at(1);
   sharedExpertParam.enableCVOverlap = false; // OneRec doesn't use CV overlap
   sharedExpertParam.enableSwiGLUQuantForSharedExperts =
       param.enableSwiGLUQuantForSharedExperts;
